@@ -1,0 +1,142 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────
+# ShopNow — Local Development Stack
+# Both frontend and backend are Node.js
+# Run: docker compose up --build
+# ─────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  shopnow-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: shopnow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       shopnow
+      POSTGRES_USER:     shopnow
+      POSTGRES_PASSWORD: shopnow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [shopnow-net]
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopnow -d shopnow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── Redis ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: shopnow-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks: [shopnow-net]
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── Backend API (Node.js/Express) ───────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: shopnow-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://shopnow:shopnow@postgres:5432/shopnow
+      REDIS_URL:    redis://redis:6379/0
+      CACHE_TTL:    "60"
+      PORT:         "5000"
+    networks: [shopnow-net]
+    ports:
+      - "5001:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  # ── Frontend (Node.js/Express) ──────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    container_name: shopnow-frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:5000
+      PORT:        "3000"
+    networks: [shopnow-net]
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  # ── Redis Commander (debug UI) ──────────────────────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: shopnow-redis-ui
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    networks: [shopnow-net]
+    ports:
+      - "8081:8081"
+    depends_on: [redis]
+    profiles: ["debug"]
+
+  # ── pgAdmin (debug UI) ──────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: shopnow-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL:    admin@shopnow.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    networks: [shopnow-net]
+    ports:
+      - "5050:80"
+    profiles: ["debug"]
