@@ -180,6 +180,19 @@
   .form-input{width:100%;padding:10px 14px;border-radius:12px;border:1px solid var(--border);
     background:rgba(255,255,255,.07);color:var(--text);font-size:.9rem;resize:vertical;outline:none;margin-top:6px}
 
+  /* ── Product admin actions ── */
+  .admin-bar{display:flex;justify-content:flex-end;margin-bottom:12px}
+  .product-admin{display:flex;gap:6px;margin-top:8px}
+  .btn-edit{padding:5px 10px;border-radius:8px;border:1px solid var(--border);background:rgba(255,255,255,.07);
+    color:var(--muted);cursor:pointer;font-size:.78rem;transition:.15s}
+  .btn-edit:hover{background:rgba(124,58,237,.2);color:var(--text)}
+  .btn-del{padding:5px 10px;border-radius:8px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);
+    color:var(--danger);cursor:pointer;font-size:.78rem;transition:.15s}
+  .btn-del:hover{background:rgba(239,68,68,.2)}
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .form-label{font-size:.82rem;color:var(--muted);margin-bottom:2px;display:block}
+  .form-group{display:grid;gap:2px;margin-bottom:10px}
+
   /* ── Message toast ── */
   .toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:16px;
     border:1px solid transparent;font-size:.92rem;z-index:200;
@@ -242,13 +255,16 @@
   </section>
 
   <!-- Tabs + layout -->
-  <div class="tabs">
-    <button class="tab active" data-tab="shop">🛍️ Shop</button>
-    <button class="tab" data-tab="orders">📦 My Orders</button>
-    <button class="tab" data-tab="wishlist">♡ Wishlist</button>
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+    <div class="tabs" style="margin-bottom:0">
+      <button class="tab active" data-tab="shop">🛍️ Shop</button>
+      <button class="tab" data-tab="orders">📦 My Orders</button>
+      <button class="tab" data-tab="wishlist">♡ Wishlist</button>
+    </div>
+    <button class="btn-primary btn-sm" id="openAddProduct" style="margin-bottom:0">+ Add Product</button>
   </div>
 
-  <div class="layout">
+  <div class="layout" style="margin-top:12px">
     <div>
       <!-- Shop tab -->
       <div id="tab-shop" class="tab-content active">
@@ -318,6 +334,47 @@
       </div>
       <textarea class="form-input" id="reviewText" rows="2" placeholder="Write your comment…"></textarea>
       <button class="btn-primary btn-sm" style="margin-top:8px;width:100%" id="submitReview">Submit review</button>
+    </div>
+  </div>
+</div>
+
+<!-- Create / Edit product modal -->
+<div class="overlay" id="productFormModal">
+  <div class="modal" style="max-width:520px">
+    <button class="modal-close" id="productFormClose">✕</button>
+    <h2 id="productFormTitle" style="margin-bottom:18px">Add Product</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="pfId">Product ID <span style="color:var(--muted)">(e.g. p021)</span></label>
+        <input class="form-input" id="pfId" placeholder="p021" maxlength="10">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pfCategory">Category</label>
+        <input class="form-input" id="pfCategory" placeholder="Electronics" list="pfCategoryList">
+        <datalist id="pfCategoryList"></datalist>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="pfName">Product Name</label>
+      <input class="form-input" id="pfName" placeholder="Wireless Headphones">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="pfPrice">Price ($)</label>
+        <input class="form-input" id="pfPrice" type="number" min="0" step="0.01" placeholder="29.99">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pfStock">Stock (units)</label>
+        <input class="form-input" id="pfStock" type="number" min="0" step="1" placeholder="100">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="pfDesc">Description</label>
+      <textarea class="form-input" id="pfDesc" rows="3" placeholder="Short product description…"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button class="btn-primary" style="flex:1" id="productFormSave">Save Product</button>
+      <button class="btn-secondary" style="flex:1" id="productFormCancel">Cancel</button>
     </div>
   </div>
 </div>
@@ -479,6 +536,10 @@ function renderProducts(){
             ${p.stock<1?'Out of stock':'Add to cart'}
           </button>
         </div>
+        <div class="product-admin">
+          <button class="btn-edit" data-edit="${p.id}">✏ Edit</button>
+          <button class="btn-del" data-del="${p.id}">🗑 Delete</button>
+        </div>
       </div>
     </article>`;
   }).join('');
@@ -486,6 +547,8 @@ function renderProducts(){
   grid.querySelectorAll('[data-add]').forEach(btn=>btn.addEventListener('click',()=>addToCart(btn.dataset.add)));
   grid.querySelectorAll('[data-view]').forEach(btn=>btn.addEventListener('click',()=>openProduct(btn.dataset.view)));
   grid.querySelectorAll('[data-wish]').forEach(btn=>btn.addEventListener('click',()=>toggleWishlist(btn.dataset.wish)));
+  grid.querySelectorAll('[data-edit]').forEach(btn=>btn.addEventListener('click',()=>openEditProduct(btn.dataset.edit)));
+  grid.querySelectorAll('[data-del]').forEach(btn=>btn.addEventListener('click',()=>deleteProduct(btn.dataset.del)));
 }
 
 // ── Cart ──────────────────────────────────────────────────────
@@ -812,6 +875,88 @@ document.getElementById('refreshBtn').addEventListener('click', async()=>{
   await Promise.all([checkHealth(), loadProducts(), loadCart(), loadWishlist(), loadStats()]);
   toast('Store refreshed','ok');
 });
+
+// ── Product CRUD ──────────────────────────────────────────────
+let productFormMode = 'create'; // 'create' | 'edit'
+let editingProductId = null;
+
+function openProductForm(mode, product){
+  productFormMode = mode;
+  editingProductId = product?.id || null;
+
+  document.getElementById('productFormTitle').textContent = mode==='edit' ? 'Edit Product' : 'Add Product';
+  document.getElementById('pfId').value         = product?.id          || '';
+  document.getElementById('pfId').disabled      = mode === 'edit';
+  document.getElementById('pfName').value       = product?.name        || '';
+  document.getElementById('pfCategory').value   = product?.category    || '';
+  document.getElementById('pfPrice').value      = product?.price       || '';
+  document.getElementById('pfStock').value      = product?.stock       || '';
+  document.getElementById('pfDesc').value       = product?.description || '';
+
+  // Populate category datalist from known categories
+  const dl = document.getElementById('pfCategoryList');
+  dl.innerHTML = state.products
+    .map(p=>p.category).filter((v,i,a)=>v&&a.indexOf(v)===i)
+    .map(c=>`<option value="${c}">`).join('');
+
+  document.getElementById('productFormModal').classList.add('open');
+}
+
+function openEditProduct(productId){
+  const p = state.products.find(x=>x.id===productId);
+  if(p) openProductForm('edit', p);
+}
+
+document.getElementById('openAddProduct').addEventListener('click', ()=>openProductForm('create'));
+document.getElementById('productFormClose').addEventListener('click',  ()=>document.getElementById('productFormModal').classList.remove('open'));
+document.getElementById('productFormCancel').addEventListener('click', ()=>document.getElementById('productFormModal').classList.remove('open'));
+
+document.getElementById('productFormSave').addEventListener('click', async()=>{
+  const id    = document.getElementById('pfId').value.trim();
+  const name  = document.getElementById('pfName').value.trim();
+  const cat   = document.getElementById('pfCategory').value.trim();
+  const price = parseFloat(document.getElementById('pfPrice').value);
+  const stock = parseInt(document.getElementById('pfStock').value, 10);
+  const desc  = document.getElementById('pfDesc').value.trim();
+
+  if(!name || !cat || isNaN(price) || isNaN(stock)){
+    toast('Please fill in all required fields','err'); return;
+  }
+  if(productFormMode==='create' && !id){
+    toast('Product ID is required','err'); return;
+  }
+
+  const btn = document.getElementById('productFormSave');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  try {
+    if(productFormMode==='edit'){
+      await api('PUT',`/api/products/${editingProductId}`,{name,category:cat,price,stock,description:desc});
+      toast(`${name} updated`,'ok');
+    } else {
+      await api('POST','/api/products',{id,name,category:cat,price,stock,description:desc});
+      toast(`${name} added to store`,'ok');
+    }
+    document.getElementById('productFormModal').classList.remove('open');
+    await loadProducts();
+  } catch(e){
+    toast(e.message||'Save failed','err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Product';
+  }
+});
+
+async function deleteProduct(productId){
+  const p = state.products.find(x=>x.id===productId);
+  if(!confirm(`Delete "${p?.name||productId}"? This cannot be undone.`)) return;
+  try {
+    await api('DELETE',`/api/products/${productId}`);
+    toast(`${p?.name||productId} deleted`,'ok');
+    await loadProducts();
+  } catch(e){ toast(e.message||'Delete failed','err'); }
+}
 
 // ── Boot ──────────────────────────────────────────────────────
 (async function init(){
