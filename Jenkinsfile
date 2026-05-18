@@ -75,10 +75,9 @@ pipeline {
         // ── Tool paths (Jenkins shell doesn't inherit Mac PATH) ───
         PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
 
-        // ── AWS credentials (from Jenkins credential store) ───
-        AWS_ACCESS_KEY_ID     = credentials('shopnow-aws-key-id')
-        AWS_SECRET_ACCESS_KEY = credentials('shopnow-aws-secret-key')
-        AWS_DEFAULT_REGION    = 'eu-west-1'
+        // ── AWS credentials via named profile in ~/.aws/credentials ───
+        AWS_PROFILE        = 'shopnow-jenkins'
+        AWS_DEFAULT_REGION = 'eu-west-1'
 
         // ── Project config ────────────────────────────────────
         PROJECT          = 'shopnow'
