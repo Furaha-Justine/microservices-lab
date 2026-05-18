@@ -61,7 +61,9 @@ describe('Products API', () => {
   ];
 
   test('GET /api/products returns list from DB', async () => {
-    db.query.mockResolvedValueOnce({ rows: mockRows });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ count: '2' }] })  // COUNT query
+      .mockResolvedValueOnce({ rows: mockRows });           // data query
     const res = await request(app).get('/api/products');
     expect(res.statusCode).toBe(200);
     expect(res.body.products).toHaveLength(2);
@@ -77,7 +79,9 @@ describe('Products API', () => {
   });
 
   test('GET /api/products?category=Sports filters results', async () => {
-    db.query.mockResolvedValueOnce({ rows: [mockRows[1]] });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] })   // COUNT query
+      .mockResolvedValueOnce({ rows: [mockRows[1]] });       // data query
     const res = await request(app).get('/api/products?category=Sports');
     expect(res.statusCode).toBe(200);
     expect(res.body.total).toBe(1);
@@ -107,14 +111,14 @@ describe('Products API', () => {
 describe('Cart API', () => {
   test('POST /api/cart adds item successfully', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [{ stock: 100 }] })  // stock check
-      .mockResolvedValueOnce({ rows: [] });                // insert
+      .mockResolvedValueOnce({ rows: [{ stock: 100 }] })                                   // stock check
+      .mockResolvedValueOnce({ rows: [{ id: 1, session_id: 'sess-1', product_id: 'p001', quantity: 2 }] }); // upsert
     const res = await request(app)
       .post('/api/cart')
       .send({ product_id: 'p001', quantity: 2, session_id: 'sess-1' });
     expect(res.statusCode).toBe(200);
-    expect(res.body.message).toBe('Added to cart');
-    expect(res.body.product_id).toBe('p001');
+    expect(res.body.message).toBe('Cart updated');
+    expect(res.body.item.product_id).toBe('p001');
   });
 
   test('POST /api/cart returns 400 when product_id missing', async () => {
@@ -141,7 +145,7 @@ describe('Cart API', () => {
   test('GET /api/cart/:session_id returns cart with total', async () => {
     db.query.mockResolvedValueOnce({
       rows: [
-        { product_id: 'p001', name: 'Headphones', price: '79.99', quantity: 2 },
+        { product_id: 'p001', name: 'Headphones', price: '79.99', stock: 100, quantity: 2, subtotal: '159.98' },
       ],
     });
     const res = await request(app).get('/api/cart/sess-1');
