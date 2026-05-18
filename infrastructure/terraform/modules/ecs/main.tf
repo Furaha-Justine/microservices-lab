@@ -131,7 +131,7 @@ resource "aws_security_group" "frontend" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "ALB → Frontend"
+    description     = "ALB to Frontend"
     from_port       = 3000
     to_port         = 3000
     protocol        = "tcp"
@@ -154,7 +154,7 @@ resource "aws_security_group" "backend" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Frontend → Backend"
+    description     = "Frontend to Backend"
     from_port       = 5000
     to_port         = 5000
     protocol        = "tcp"
@@ -177,7 +177,7 @@ resource "aws_security_group" "postgres" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Backend → Postgres"
+    description     = "Backend to Postgres"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
@@ -200,7 +200,7 @@ resource "aws_security_group" "redis" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Backend → Redis"
+    description     = "Backend to Redis"
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"

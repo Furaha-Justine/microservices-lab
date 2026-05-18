@@ -12,14 +12,17 @@
 terraform {
   required_version = ">= 1.7"
   required_providers {
-    aws = { source = "hashicorp/aws"; version = "~> 5.40" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.40"
+    }
   }
 
   # Create this S3 bucket and DynamoDB table before first terraform init
   backend "s3" {
-    bucket         = "shopnow-terraform-state"
+    bucket         = "shopnow-terraform-state-445567114084"
     key            = "prod/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "eu-west-1"
     dynamodb_table = "shopnow-terraform-locks"
     encrypt        = true
   }

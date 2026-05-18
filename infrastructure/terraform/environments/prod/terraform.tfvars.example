@@ -1,6 +1,6 @@
 # Copy this file to terraform.tfvars — NEVER commit terraform.tfvars to git.
 
-aws_region        = "us-east-1"
+aws_region        = "eu-west-1"
 project           = "shopnow"
 environment       = "prod"
 vpc_cidr          = "10.0.0.0/16"

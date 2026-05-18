@@ -12,8 +12,8 @@
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
-BUCKET="${1:-shopnow-terraform-state}"
-REGION="${2:-us-east-1}"
+BUCKET="${1:-shopnow-terraform-state-445567114084}"
+REGION="${2:-eu-west-1}"
 TABLE="shopnow-terraform-locks"
 
 echo "──────────────────────────────────────────────"

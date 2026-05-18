@@ -10,13 +10,16 @@
 terraform {
   required_version = ">= 1.7"
   required_providers {
-    aws = { source = "hashicorp/aws"; version = "~> 5.40" }
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.40"
+    }
   }
 
   backend "s3" {
-    bucket         = "shopnow-terraform-state"
+    bucket         = "shopnow-terraform-state-445567114084"
     key            = "staging/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "eu-west-1"
     dynamodb_table = "shopnow-terraform-locks"
     encrypt        = true
   }
@@ -27,15 +30,18 @@ provider "aws" {
   default_tags { tags = local.common_tags }
 }
 
+data "aws_availability_zones" "available" { state = "available" }
+data "aws_caller_identity" "current" {}
+
 locals {
   common_tags = {
     Project     = var.project
     Environment = "staging"
     ManagedBy   = "terraform"
   }
+  # ECR URL is deterministic — no need to look up existing repos
+  ecr_base = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
 }
-
-data "aws_availability_zones" "available" { state = "available" }
 
 # ── VPC ───────────────────────────────────────────────────────
 # Separate VPC from prod — different CIDR to avoid overlap
@@ -48,20 +54,10 @@ module "vpc" {
   tags               = local.common_tags
 }
 
-# ── ECR ───────────────────────────────────────────────────────
-# Reference the repos created by prod — staging uses the same
-# repos with the :staging image tag.
-data "aws_ecr_repository" "frontend" {
-  name = "${var.project}/frontend"
-}
-
-data "aws_ecr_repository" "backend" {
-  name = "${var.project}/backend"
-}
-
 # ── ECS Fargate ───────────────────────────────────────────────
 # 1 cluster · 4 task definitions · 4 services
 # Scaled down: 1 task each, half the CPU/memory of prod
+# ECR repos are created by prod — staging reuses them with :staging tag
 module "ecs" {
   source = "../../modules/ecs"
 
@@ -71,8 +67,8 @@ module "ecs" {
   public_subnet_ids  = module.vpc.public_subnet_ids
   private_subnet_ids = module.vpc.private_subnet_ids
 
-  frontend_image = "${data.aws_ecr_repository.frontend.repository_url}:staging"
-  backend_image  = "${data.aws_ecr_repository.backend.repository_url}:staging"
+  frontend_image = "${local.ecr_base}/${var.project}/frontend:staging"
+  backend_image  = "${local.ecr_base}/${var.project}/backend:staging"
 
   postgres_password = var.postgres_password
 
@@ -88,9 +84,20 @@ module "ecs" {
 }
 
 # ── Variables ─────────────────────────────────────────────────
-variable "aws_region"        { type = string; default = "us-east-1" }
-variable "project"           { type = string; default = "shopnow" }
-variable "postgres_password" { type = string; sensitive = true }
+variable "aws_region" {
+  type    = string
+  default = "eu-west-1"
+}
+
+variable "project" {
+  type    = string
+  default = "shopnow"
+}
+
+variable "postgres_password" {
+  type      = string
+  sensitive = true
+}
 
 # ── Outputs ───────────────────────────────────────────────────
 output "app_url"              { value = "http://${module.ecs.alb_dns_name}" }
