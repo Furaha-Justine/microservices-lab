@@ -8,7 +8,7 @@ set -euo pipefail
 
 TAG="${1:-latest}"
 CLUSTER="${2:-shopnow-ecs}"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-eu-west-1}"
 GREEN='\033[0;32m'; NC='\033[0m'
 ok() { echo -e "${GREEN}✓ $*${NC}"; }
 

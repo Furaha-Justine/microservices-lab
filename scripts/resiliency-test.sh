@@ -6,7 +6,7 @@ set -euo pipefail
 
 CLUSTER="${1:-shopnow-ecs}"
 SERVICE="${2:-shopnow-backend}"
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-eu-west-1}"
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 ok()   { echo -e "${GREEN}$(date '+%H:%M:%S')  ✓ $*${NC}"; }

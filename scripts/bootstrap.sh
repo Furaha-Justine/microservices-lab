@@ -3,7 +3,7 @@
 # Usage: ./scripts/bootstrap.sh [AWS_REGION] [GITHUB_ORG/REPO]
 set -euo pipefail
 
-REGION="${1:-us-east-1}"
+REGION="${1:-eu-west-1}"
 GITHUB_REPO="${2:-your-org/shopnow}"
 PROJECT="shopnow"
 BUCKET="${PROJECT}-terraform-state"
@@ -19,7 +19,7 @@ if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "  ✓ $BUCKET already exists"
 else
   aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
-    $([[ "$REGION" != "us-east-1" ]] && echo "--create-bucket-configuration LocationConstraint=$REGION" || echo "")
+    $([[ "$REGION" != "eu-west-1" ]] && echo "--create-bucket-configuration LocationConstraint=$REGION" || echo "")
   aws s3api put-bucket-versioning --bucket "$BUCKET" \
     --versioning-configuration Status=Enabled
   aws s3api put-bucket-encryption --bucket "$BUCKET" \
