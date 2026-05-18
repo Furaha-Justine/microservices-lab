@@ -9,13 +9,13 @@ output "alb_dns_name" {
 }
 
 # ── Infrastructure ─────────────────────────────────────────────
-output "vpc_id"          { value = module.vpc.vpc_id }
+output "vpc_id" { value = module.vpc.vpc_id }
 output "ecs_cluster_name" { value = module.ecs.cluster_name }
 
 # ── ECR image URLs ─────────────────────────────────────────────
 # Use these in your Jenkins pipeline: docker build + docker push
 output "ecr_frontend_url" { value = module.ecr.repository_urls["frontend"] }
-output "ecr_backend_url"  { value = module.ecr.repository_urls["backend"] }
+output "ecr_backend_url" { value = module.ecr.repository_urls["backend"] }
 
 # ── Service discovery ──────────────────────────────────────────
 output "service_discovery_namespace" {

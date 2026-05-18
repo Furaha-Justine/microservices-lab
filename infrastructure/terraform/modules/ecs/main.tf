@@ -319,8 +319,8 @@ resource "aws_ecs_task_definition" "postgres" {
     }]
 
     environment = [
-      { name = "POSTGRES_DB",       value = var.project },
-      { name = "POSTGRES_USER",     value = var.project },
+      { name = "POSTGRES_DB", value = var.project },
+      { name = "POSTGRES_USER", value = var.project },
       { name = "POSTGRES_PASSWORD", value = var.postgres_password }
     ]
 
@@ -415,17 +415,17 @@ resource "aws_ecs_task_definition" "backend" {
 
     environment = [
       {
-        name  = "DATABASE_URL"
+        name = "DATABASE_URL"
         # Cloud Map resolves postgres.shopnow.local to the postgres task IP
         value = "postgresql://${var.project}:${var.postgres_password}@postgres.${var.project}.local:5432/${var.project}"
       },
       {
-        name  = "REDIS_URL"
+        name = "REDIS_URL"
         # Cloud Map resolves redis.shopnow.local to the redis task IP
         value = "redis://redis.${var.project}.local:6379/0"
       },
       { name = "CACHE_TTL", value = "60" },
-      { name = "PORT",      value = "5000" }
+      { name = "PORT", value = "5000" }
     ]
 
     healthCheck = {
@@ -471,7 +471,7 @@ resource "aws_ecs_task_definition" "frontend" {
 
     environment = [
       {
-        name  = "BACKEND_URL"
+        name = "BACKEND_URL"
         # Cloud Map resolves backend.shopnow.local to the backend task IPs
         value = "http://backend.${var.project}.local:5000"
       },

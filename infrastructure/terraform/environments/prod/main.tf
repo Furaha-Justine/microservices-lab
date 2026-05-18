@@ -98,7 +98,7 @@ module "iam" {
 
   project             = var.project
   ecr_repository_arns = values(module.ecr.repository_arns)
-  ecs_task_role_arns  = [
+  ecs_task_role_arns = [
     module.ecs.task_execution_role_arn,
     module.ecs.task_role_arn
   ]

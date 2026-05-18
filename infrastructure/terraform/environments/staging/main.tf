@@ -100,6 +100,6 @@ variable "postgres_password" {
 }
 
 # ── Outputs ───────────────────────────────────────────────────
-output "app_url"              { value = "http://${module.ecs.alb_dns_name}" }
-output "ecs_cluster_name"     { value = module.ecs.cluster_name }
+output "app_url" { value = "http://${module.ecs.alb_dns_name}" }
+output "ecs_cluster_name" { value = module.ecs.cluster_name }
 output "service_discovery_ns" { value = module.ecs.service_discovery_ns }

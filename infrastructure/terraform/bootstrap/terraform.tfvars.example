@@ -1,0 +1,4 @@
+aws_region        = "eu-west-1"
+project           = "shopnow"
+state_bucket_name = "shopnow-terraform-state-445567114084"
+lock_table_name   = "shopnow-terraform-locks"

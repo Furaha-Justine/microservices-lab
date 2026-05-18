@@ -89,6 +89,7 @@ shopnow/
 │
 ├── infrastructure/
 │   └── terraform/
+│       ├── bootstrap/            # S3 state bucket + DynamoDB lock table
 │       ├── modules/
 │       │   ├── vpc/                # VPC, subnets, NAT GWs, Flow Logs
 │       │   ├── ecs/                # Cluster, tasks, services, ALB, Cloud Map, scaling
@@ -102,12 +103,6 @@ shopnow/
 │           │   └── terraform.tfvars.example
 │           └── staging/            # Single-AZ, 1 task, t3.micro
 │               └── main.tf
-│
-└── scripts/
-│   ├── bootstrap.sh                # One-time AWS setup (S3, DDB, IAM, ECR)
-│   ├── build-push.sh               # Build + push images to ECR
-│   ├── deploy-ecs.sh               # Deploy to ECS, wait for stable
-│   └── resiliency-test.sh          # Kill task, measure recovery, report downtime
 │
 └── .github/
     └── workflows/
@@ -250,11 +245,14 @@ environments/prod/main.tf
 ### Bootstrap and deploy
 
 ```bash
-# One-time setup (S3 bucket, DynamoDB, OIDC, IAM role, ECR)
-./scripts/bootstrap.sh us-east-1 your-org/shopnow
+# Bootstrap the Terraform backend first
+cd infrastructure/terraform/bootstrap
+cp terraform.tfvars.example terraform.tfvars
+terraform init
+terraform apply
 
 # Deploy infrastructure
-cd infrastructure/terraform/environments/prod
+cd ../environments/prod
 cp terraform.tfvars.example terraform.tfvars  # fill in db_password, alarm_email
 terraform init
 terraform plan
@@ -263,6 +261,9 @@ terraform apply
 terraform output app_url         # → http://<alb-dns>
 terraform output ecs_cluster_name
 ```
+
+Terraform bootstrap resources are created by the dedicated stack in infrastructure/terraform/bootstrap.
+Jenkins handles build, push, deploy, and verification on push.
 
 ---
 
@@ -292,10 +293,7 @@ deployment_circuit_breaker = enabled + auto-rollback
 ### Build, push, and deploy
 
 ```bash
-# All-in-one
-./scripts/build-push.sh && ./scripts/deploy-ecs.sh
-
-# Or step by step
+# Manual fallback only
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGION=us-east-1
 
@@ -419,8 +417,7 @@ aws ecs describe-services --cluster shopnow-ecs --services shopnow-backend \
 ### Automated script
 
 ```bash
-# Runs end-to-end: starts poller, kills a task, waits for recovery, reports
-./scripts/resiliency-test.sh shopnow-ecs shopnow-backend
+# Use the ECS console or Jenkins pipeline resiliency stage to demonstrate recovery.
 ```
 
 ### Manual — Terminal A (start first)
@@ -620,16 +617,15 @@ while true; do
   echo "$(date '+%H:%M:%S')  $CODE"; sleep 1
 done
 
-# Terminal B: automated kill + recovery
-./scripts/resiliency-test.sh shopnow-ecs shopnow-backend
-# Output: Recovery in ~22 seconds | 0 failures — ZERO DOWNTIME ✓
+# Terminal B: stop one ECS task from the AWS Console, then watch ECS replace it
+# Output: recovery in ~seconds | app continues serving requests
 
 # ══════════════════════════════════════════════════════
 # PART 6 — Trigger CI/CD
 # ══════════════════════════════════════════════════════
 git commit --allow-empty -m "chore: pipeline demo"
 git push origin main
-# GitHub Actions: test-frontend + test-backend → build → deploy
+# Jenkins: tests → build → push → deploy → verify
 ```
 
 ---
