@@ -72,6 +72,9 @@ pipeline {
     agent any
 
     environment {
+        // ── Tool paths (Jenkins shell doesn't inherit Mac PATH) ───
+        PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+
         // ── AWS credentials (from Jenkins credential store) ───
         AWS_ACCESS_KEY_ID     = credentials('shopnow-aws-key-id')
         AWS_SECRET_ACCESS_KEY = credentials('shopnow-aws-secret-key')
