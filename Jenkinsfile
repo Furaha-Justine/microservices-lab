@@ -182,6 +182,7 @@ pipeline {
                         sh """
                             echo "── Building frontend ──"
                             docker build \
+                                --platform linux/amd64 \
                                 --target production \
                                 --cache-from ${ECR_REGISTRY}/${PROJECT}/frontend:latest \
                                 -t ${FRONTEND_IMAGE} \
@@ -200,6 +201,7 @@ pipeline {
                         sh """
                             echo "── Building backend ──"
                             docker build \
+                                --platform linux/amd64 \
                                 --target production \
                                 --cache-from ${ECR_REGISTRY}/${PROJECT}/backend:latest \
                                 -t ${BACKEND_IMAGE} \
