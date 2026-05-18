@@ -75,7 +75,7 @@ pipeline {
         // ── AWS credentials (from Jenkins credential store) ───
         AWS_ACCESS_KEY_ID     = credentials('shopnow-aws-key-id')
         AWS_SECRET_ACCESS_KEY = credentials('shopnow-aws-secret-key')
-        AWS_DEFAULT_REGION    = 'us-east-1'
+        AWS_DEFAULT_REGION    = 'eu-west-1'
 
         // ── Project config ────────────────────────────────────
         PROJECT          = 'shopnow'
@@ -92,7 +92,6 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timeout(time: 40, unit: 'MINUTES')
         disableConcurrentBuilds()
-        ansiColor('xterm')
     }
 
     stages {
