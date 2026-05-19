@@ -264,38 +264,15 @@ resource "aws_lb_listener" "http" {
 }
 
 # ── Cloud Map: Private DNS Namespace ──────────────────────────
-# Creates a Route53 private hosted zone: shopnow.local
-# ECS registers task IPs here automatically via service_registries.
+# Service Connect uses this namespace to register short DNS names:
+#   backend  → backend:5000
+#   postgres → postgres:5432
+#   redis    → redis:6379
 resource "aws_service_discovery_private_dns_namespace" "main" {
   name        = "${var.project}.local"
-  description = "ShopNow internal service discovery"
+  description = "ShopNow Service Connect namespace"
   vpc         = var.vpc_id
   tags        = var.tags
-}
-
-# One Cloud Map service per internal service
-# backend  → backend.shopnow.local
-# postgres → postgres.shopnow.local
-# redis    → redis.shopnow.local
-resource "aws_service_discovery_service" "services" {
-  for_each = toset(["backend", "postgres", "redis"])
-
-  name = each.key
-
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.main.id
-    dns_records {
-      ttl  = 10
-      type = "A"
-    }
-    routing_policy = "MULTIVALUE"
-  }
-
-  health_check_custom_config {
-    failure_threshold = 1
-  }
-
-  tags = var.tags
 }
 
 # ── Task Definition: Postgres ─────────────────────────────────
@@ -314,8 +291,10 @@ resource "aws_ecs_task_definition" "postgres" {
     essential = true
 
     portMappings = [{
+      name          = "postgres-port"
       containerPort = 5432
       protocol      = "tcp"
+      appProtocol   = "http"
     }]
 
     environment = [
@@ -361,8 +340,10 @@ resource "aws_ecs_task_definition" "redis" {
     essential = true
 
     portMappings = [{
+      name          = "redis-port"
       containerPort = 6379
       protocol      = "tcp"
+      appProtocol   = "http"
     }]
 
     command = [
@@ -409,20 +390,22 @@ resource "aws_ecs_task_definition" "backend" {
     essential = true
 
     portMappings = [{
+      name          = "backend-port"
       containerPort = 5000
       protocol      = "tcp"
+      appProtocol   = "http"
     }]
 
     environment = [
       {
-        name = "DATABASE_URL"
-        # Cloud Map resolves postgres.shopnow.local to the postgres task IP
-        value = "postgresql://${var.project}:${var.postgres_password}@postgres.${var.project}.local:5432/${var.project}"
+        name  = "DATABASE_URL"
+        # Service Connect resolves "postgres" to the postgres service endpoint
+        value = "postgresql://${var.project}:${var.postgres_password}@postgres:5432/${var.project}"
       },
       {
-        name = "REDIS_URL"
-        # Cloud Map resolves redis.shopnow.local to the redis task IP
-        value = "redis://redis.${var.project}.local:6379/0"
+        name  = "REDIS_URL"
+        # Service Connect resolves "redis" to the redis service endpoint
+        value = "redis://redis:6379/0"
       },
       { name = "CACHE_TTL", value = "60" },
       { name = "PORT", value = "5000" }
@@ -465,15 +448,17 @@ resource "aws_ecs_task_definition" "frontend" {
     essential = true
 
     portMappings = [{
+      name          = "frontend-port"
       containerPort = 3000
       protocol      = "tcp"
+      appProtocol   = "http"
     }]
 
     environment = [
       {
-        name = "BACKEND_URL"
-        # Cloud Map resolves backend.shopnow.local to the backend task IPs
-        value = "http://backend.${var.project}.local:5000"
+        name  = "BACKEND_URL"
+        # Service Connect resolves "backend" to the backend service endpoint
+        value = "http://backend:5000"
       },
       { name = "PORT", value = "3000" }
     ]
@@ -500,7 +485,7 @@ resource "aws_ecs_task_definition" "frontend" {
 }
 
 # ── ECS Service: Postgres ─────────────────────────────────────
-# Runs 1 task. Registers its IP in Cloud Map as postgres.shopnow.local
+# Runs 1 task. Reachable by other services as "postgres:5432"
 resource "aws_ecs_service" "postgres" {
   name            = "${var.project}-postgres"
   cluster         = aws_ecs_cluster.main.id
@@ -519,8 +504,17 @@ resource "aws_ecs_service" "postgres" {
     assign_public_ip = false
   }
 
-  service_registries {
-    registry_arn = aws_service_discovery_service.services["postgres"].arn
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_private_dns_namespace.main.arn
+
+    service {
+      port_name = "postgres-port"
+      client_alias {
+        port     = 5432
+        dns_name = "postgres"
+      }
+    }
   }
 
   deployment_circuit_breaker {
@@ -536,7 +530,7 @@ resource "aws_ecs_service" "postgres" {
 }
 
 # ── ECS Service: Redis ────────────────────────────────────────
-# Runs 1 task. Registers its IP in Cloud Map as redis.shopnow.local
+# Runs 1 task. Reachable by other services as "redis:6379"
 resource "aws_ecs_service" "redis" {
   name            = "${var.project}-redis"
   cluster         = aws_ecs_cluster.main.id
@@ -555,8 +549,17 @@ resource "aws_ecs_service" "redis" {
     assign_public_ip = false
   }
 
-  service_registries {
-    registry_arn = aws_service_discovery_service.services["redis"].arn
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_private_dns_namespace.main.arn
+
+    service {
+      port_name = "redis-port"
+      client_alias {
+        port     = 6379
+        dns_name = "redis"
+      }
+    }
   }
 
   deployment_circuit_breaker {
@@ -572,8 +575,8 @@ resource "aws_ecs_service" "redis" {
 }
 
 # ── ECS Service: Backend ──────────────────────────────────────
-# Waits for postgres and redis services to exist before creating.
-# Registers its IPs in Cloud Map as backend.shopnow.local.
+# Reachable by frontend as "backend:5000" via Service Connect.
+# Also a client — connects to postgres:5432 and redis:6379.
 # Jenkins redeploys this by updating the task definition revision.
 resource "aws_ecs_service" "backend" {
   name            = "${var.project}-backend"
@@ -593,8 +596,17 @@ resource "aws_ecs_service" "backend" {
     assign_public_ip = false
   }
 
-  service_registries {
-    registry_arn = aws_service_discovery_service.services["backend"].arn
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_private_dns_namespace.main.arn
+
+    service {
+      port_name = "backend-port"
+      client_alias {
+        port     = 5000
+        dns_name = "backend"
+      }
+    }
   }
 
   deployment_circuit_breaker {
@@ -605,19 +617,18 @@ resource "aws_ecs_service" "backend" {
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
-  # Ensure postgres and redis are registered in Cloud Map before backend starts
   depends_on = [aws_ecs_service.postgres, aws_ecs_service.redis]
 
   tags = var.tags
 
   lifecycle {
-    # Jenkins updates task_definition on deploy — don't let Terraform revert it
     ignore_changes = [desired_count, task_definition]
   }
 }
 
 # ── ECS Service: Frontend ─────────────────────────────────────
-# Sits behind the ALB. Jenkins redeploys this on new image push.
+# Sits behind the ALB. Client only — connects to backend:5000.
+# Jenkins redeploys this on new image push.
 resource "aws_ecs_service" "frontend" {
   name            = "${var.project}-frontend"
   cluster         = aws_ecs_cluster.main.id
@@ -634,6 +645,12 @@ resource "aws_ecs_service" "frontend" {
     subnets          = var.private_subnet_ids
     security_groups  = [aws_security_group.frontend.id]
     assign_public_ip = false
+  }
+
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_private_dns_namespace.main.arn
+    # No service block — frontend is a client only, not discovered by others
   }
 
   load_balancer {
