@@ -12,17 +12,23 @@ const PORT = process.env.PORT || 3000;
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:5000';
 
-const cspDefaults = helmet.contentSecurityPolicy.getDefaultDirectives();
-delete cspDefaults['upgrade-insecure-requests']; // no HTTPS on ALB — keep requests as HTTP
-
+// useDefaults:false so Helmet doesn't re-inject upgrade-insecure-requests.
+// The ALB is HTTP-only; that directive would force the browser to HTTPS and break all API calls.
 app.use(helmet({
   contentSecurityPolicy: {
+    useDefaults: false,
     directives: {
-      ...cspDefaults,
-      'script-src':  ["'self'", "'unsafe-inline'"],
-      'style-src':   ["'self'", "'unsafe-inline'"],
-      'img-src':     ["'self'", 'data:'],
-      'connect-src': ["'self'"],
+      'default-src':     ["'self'"],
+      'base-uri':        ["'self'"],
+      'font-src':        ["'self'", 'https:', 'data:'],
+      'form-action':     ["'self'"],
+      'frame-ancestors': ["'self'"],
+      'img-src':         ["'self'", 'data:'],
+      'object-src':      ["'none'"],
+      'script-src':      ["'self'", "'unsafe-inline'"],
+      'script-src-attr': ["'none'"],
+      'style-src':       ["'self'", "'unsafe-inline'"],
+      'connect-src':     ["'self'"],
     },
   },
   crossOriginOpenerPolicy: false,
