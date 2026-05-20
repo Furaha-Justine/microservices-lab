@@ -1,26 +1,4 @@
-// ─────────────────────────────────────────────────────────────
-// ShopNow — CI/CD Pipeline
-//
-// Stages:
-//   1. Test         — backend + frontend tests (parallel)
-//   2. ECR Login    — authenticate Docker to ECR
-//   3. Build & Push — frontend + backend images (parallel)
-//   4. Deploy       — backend first, then frontend (rolling)
-//   5. Verify       — hit ALB /health to confirm live
-//
-// Jenkins prerequisites (install on your PC):
-//   - Docker
-//   - AWS CLI v2
-//   - jq  (brew install jq  /  apt install jq)
-//   - Node.js 20+
-//
-// Jenkins credentials to configure (Manage Jenkins → Credentials):
-//   - Secret Text  id: shopnow-aws-key-id      → from: terraform output jenkins_access_key_id
-//   - Secret Text  id: shopnow-aws-secret-key  → from: terraform output -raw jenkins_secret_access_key
-//
-// Jenkins env var to configure (Manage Jenkins → System → Global properties):
-//   - ALB_DNS  → from: terraform output alb_dns_name
-// ─────────────────────────────────────────────────────────────
+
 
 // ── Helper: register new task definition revision + update service ──
 def deployService(String taskFamily, String service, String cluster, String newImage) {
@@ -75,9 +53,10 @@ pipeline {
         // ── Tool paths (Jenkins shell doesn't inherit Mac PATH) ───
         PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
 
-        // ── AWS credentials via named profile in ~/.aws/credentials ───
-        AWS_PROFILE        = 'shopnow-jenkins'
-        AWS_DEFAULT_REGION = 'eu-west-1'
+        // ── AWS credentials from Jenkins credentials store ────────────
+        AWS_ACCESS_KEY_ID     = credentials('shopnow-aws-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('shopnow-aws-secret-key')
+        AWS_DEFAULT_REGION    = 'eu-west-1'
 
         // ── Project config ────────────────────────────────────
         PROJECT          = 'shopnow'

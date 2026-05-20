@@ -1,19 +1,16 @@
 # ─────────────────────────────────────────────────────────────
-# Module: ECS Fargate — Option A (all services in ECS)
+# Module: ECS Fargate + RDS PostgreSQL + ElastiCache Redis
 #
-# 1 cluster · 4 task definitions · 4 services
+# 1 cluster · 2 task definitions · 2 ECS services
+# RDS PostgreSQL (managed) replaces the Postgres ECS container
+# ElastiCache Redis (managed) replaces the Redis ECS container
 #
 # Service topology (all in private subnets):
-#   Internet → ALB (public) → frontend → backend → postgres
-#                                                 → redis
+#   Internet → ALB (public) → frontend → backend → RDS Postgres (5432)
+#                                                 → ElastiCache Redis (6379)
 #
-# Service discovery: AWS Cloud Map  (shopnow.local)
-#   backend.shopnow.local:5000
-#   postgres.shopnow.local:5432
-#   redis.shopnow.local:6379
-#
-# NOTE: postgres data is ephemeral — attach EFS for persistence
-#       in a production system.
+# Service Connect: AWS Cloud Map (shopnow.local)
+#   backend.shopnow.local:5000  ← used by frontend
 # ─────────────────────────────────────────────────────────────
 
 # ── ECS Cluster ───────────────────────────────────────────────
@@ -39,16 +36,15 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
-# ── CloudWatch Log Groups (one per service) ───────────────────
+# ── CloudWatch Log Groups ─────────────────────────────────────
 resource "aws_cloudwatch_log_group" "services" {
-  for_each          = toset(["frontend", "backend", "postgres", "redis"])
+  for_each          = toset(["frontend", "backend"])
   name              = "/ecs/${var.project}/${each.key}"
   retention_in_days = 7
   tags              = var.tags
 }
 
 # ── IAM: Task Execution Role ──────────────────────────────────
-# ECS control plane uses this to pull images from ECR and write logs
 resource "aws_iam_role" "task_execution" {
   name = "${var.project}-ecs-execution-role"
 
@@ -70,7 +66,6 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 }
 
 # ── IAM: Task Role ────────────────────────────────────────────
-# The application container uses this at runtime
 resource "aws_iam_role" "task" {
   name = "${var.project}-ecs-task-role"
 
@@ -91,8 +86,8 @@ resource "aws_iam_role" "task" {
 #  Internet → ALB (80/443)
 #           → frontend (3000, from ALB only)
 #             → backend (5000, from frontend only)
-#               → postgres (5432, from backend only)
-#               → redis    (6379, from backend only)
+#               → RDS Postgres    (5432, from backend only)
+#               → ElastiCache     (6379, from backend only)
 
 resource "aws_security_group" "alb" {
   name        = "${var.project}-alb-sg"
@@ -171,13 +166,13 @@ resource "aws_security_group" "backend" {
   tags = merge(var.tags, { Name = "${var.project}-backend-sg" })
 }
 
-resource "aws_security_group" "postgres" {
-  name        = "${var.project}-postgres-sg"
-  description = "Postgres Fargate task: port 5432 from backend only"
+resource "aws_security_group" "rds" {
+  name        = "${var.project}-rds-sg"
+  description = "RDS PostgreSQL: port 5432 from backend only"
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Backend to Postgres"
+    description     = "Backend to RDS"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
@@ -191,16 +186,16 @@ resource "aws_security_group" "postgres" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = merge(var.tags, { Name = "${var.project}-postgres-sg" })
+  tags = merge(var.tags, { Name = "${var.project}-rds-sg" })
 }
 
-resource "aws_security_group" "redis" {
-  name        = "${var.project}-redis-sg"
-  description = "Redis Fargate task: port 6379 from backend only"
+resource "aws_security_group" "elasticache" {
+  name        = "${var.project}-elasticache-sg"
+  description = "ElastiCache Redis: port 6379 from backend only"
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "Backend to Redis"
+    description     = "Backend to ElastiCache"
     from_port       = 6379
     to_port         = 6379
     protocol        = "tcp"
@@ -214,11 +209,10 @@ resource "aws_security_group" "redis" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = merge(var.tags, { Name = "${var.project}-redis-sg" })
+  tags = merge(var.tags, { Name = "${var.project}-elasticache-sg" })
 }
 
 # ── Application Load Balancer ─────────────────────────────────
-# Lives in public subnets. Routes traffic to frontend tasks.
 resource "aws_lb" "main" {
   name               = "${var.project}-alb"
   internal           = false
@@ -264,10 +258,8 @@ resource "aws_lb_listener" "http" {
 }
 
 # ── Cloud Map: Private DNS Namespace ──────────────────────────
-# Service Connect uses this namespace to register short DNS names:
-#   backend  → backend:5000
-#   postgres → postgres:5432
-#   redis    → redis:6379
+# Service Connect registers backend here so frontend can reach
+# it at backend:5000 without hardcoding IPs.
 resource "aws_service_discovery_private_dns_namespace" "main" {
   name        = "${var.project}.local"
   description = "ShopNow Service Connect namespace"
@@ -275,101 +267,64 @@ resource "aws_service_discovery_private_dns_namespace" "main" {
   tags        = var.tags
 }
 
-# ── Task Definition: Postgres ─────────────────────────────────
-resource "aws_ecs_task_definition" "postgres" {
-  family                   = "${var.project}-postgres"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+# ── RDS: PostgreSQL ───────────────────────────────────────────
+resource "aws_db_subnet_group" "main" {
+  name       = "${var.project}-db-subnet-group"
+  subnet_ids = var.private_subnet_ids
+  tags       = merge(var.tags, { Name = "${var.project}-db-subnet-group" })
+}
 
-  container_definitions = jsonencode([{
-    name      = "postgres"
-    image     = "postgres:16-alpine"
-    essential = true
+resource "aws_db_instance" "main" {
+  identifier        = "${var.project}-postgres"
+  engine            = "postgres"
+  engine_version    = var.db_engine_version
+  instance_class    = var.db_instance_class
+  allocated_storage = var.db_allocated_storage
+  storage_type      = "gp3"
 
-    portMappings = [{
-      name          = "postgres-port"
-      containerPort = 5432
-      protocol      = "tcp"
-      appProtocol   = "http"
-    }]
+  db_name  = replace(var.project, "-", "_")
+  username = replace(var.project, "-", "_")
+  password = var.postgres_password
 
-    environment = [
-      { name = "POSTGRES_DB", value = var.project },
-      { name = "POSTGRES_USER", value = var.project },
-      { name = "POSTGRES_PASSWORD", value = var.postgres_password }
-    ]
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  publicly_accessible    = false
+  multi_az               = var.multi_az
 
-    healthCheck = {
-      command     = ["CMD-SHELL", "pg_isready -U ${var.project} -d ${var.project} || exit 1"]
-      interval    = 15
-      timeout     = 5
-      retries     = 5
-      startPeriod = 30
-    }
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.services["postgres"].name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "postgres"
-      }
-    }
-  }])
+  backup_retention_period = var.db_backup_retention_days
+  skip_final_snapshot     = true
+  deletion_protection     = false
+  apply_immediately       = true
 
   tags = var.tags
 }
 
-# ── Task Definition: Redis ────────────────────────────────────
-resource "aws_ecs_task_definition" "redis" {
-  family                   = "${var.project}-redis"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = 256
-  memory                   = 512
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+# ── ElastiCache: Redis ────────────────────────────────────────
+resource "aws_elasticache_subnet_group" "main" {
+  name       = "${var.project}-cache-subnet-group"
+  subnet_ids = var.private_subnet_ids
+  tags       = var.tags
+}
 
-  container_definitions = jsonencode([{
-    name      = "redis"
-    image     = "redis:7-alpine"
-    essential = true
+resource "aws_elasticache_replication_group" "main" {
+  replication_group_id    = "${var.project}-redis"
+  description             = "${var.project} Redis cache"
+  node_type               = var.elasticache_node_type
+  num_node_groups         = 1
+  replicas_per_node_group = var.elasticache_num_replicas
+  engine_version          = "7.1"
+  parameter_group_name    = "default.redis7"
+  port                    = 6379
 
-    portMappings = [{
-      name          = "redis-port"
-      containerPort = 6379
-      protocol      = "tcp"
-      appProtocol   = "http"
-    }]
+  subnet_group_name  = aws_elasticache_subnet_group.main.name
+  security_group_ids = [aws_security_group.elasticache.id]
 
-    command = [
-      "redis-server",
-      "--appendonly", "yes",
-      "--maxmemory", "200mb",
-      "--maxmemory-policy", "allkeys-lru"
-    ]
+  # Failover requires at least one replica
+  automatic_failover_enabled = var.elasticache_num_replicas > 0
+  multi_az_enabled           = var.elasticache_num_replicas > 0
 
-    healthCheck = {
-      command     = ["CMD-SHELL", "redis-cli ping || exit 1"]
-      interval    = 15
-      timeout     = 5
-      retries     = 3
-      startPeriod = 10
-    }
-
-    logConfiguration = {
-      logDriver = "awslogs"
-      options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.services["redis"].name
-        "awslogs-region"        = var.aws_region
-        "awslogs-stream-prefix" = "redis"
-      }
-    }
-  }])
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = false
 
   tags = var.tags
 }
@@ -399,13 +354,11 @@ resource "aws_ecs_task_definition" "backend" {
     environment = [
       {
         name  = "DATABASE_URL"
-        # Service Connect resolves "postgres" to the postgres service endpoint
-        value = "postgresql://${var.project}:${var.postgres_password}@postgres:5432/${var.project}"
+        value = "postgresql://${replace(var.project, "-", "_")}:${var.postgres_password}@${aws_db_instance.main.address}:5432/${replace(var.project, "-", "_")}"
       },
       {
         name  = "REDIS_URL"
-        # Service Connect resolves "redis" to the redis service endpoint
-        value = "redis://redis:6379/0"
+        value = "redis://${aws_elasticache_replication_group.main.primary_endpoint_address}:6379/0"
       },
       { name = "CACHE_TTL", value = "60" },
       { name = "PORT", value = "5000" }
@@ -457,7 +410,6 @@ resource "aws_ecs_task_definition" "frontend" {
     environment = [
       {
         name  = "BACKEND_URL"
-        # Service Connect resolves "backend" to the backend service endpoint
         value = "http://backend:5000"
       },
       { name = "PORT", value = "3000" }
@@ -484,99 +436,9 @@ resource "aws_ecs_task_definition" "frontend" {
   tags = var.tags
 }
 
-# ── ECS Service: Postgres ─────────────────────────────────────
-# Runs 1 task. Reachable by other services as "postgres:5432"
-resource "aws_ecs_service" "postgres" {
-  name            = "${var.project}-postgres"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.postgres.arn
-  desired_count   = 1
-
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE"
-    weight            = 1
-    base              = 1
-  }
-
-  network_configuration {
-    subnets          = var.private_subnet_ids
-    security_groups  = [aws_security_group.postgres.id]
-    assign_public_ip = false
-  }
-
-  service_connect_configuration {
-    enabled   = true
-    namespace = aws_service_discovery_private_dns_namespace.main.arn
-
-    service {
-      port_name = "postgres-port"
-      client_alias {
-        port     = 5432
-        dns_name = "postgres"
-      }
-    }
-  }
-
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  tags = var.tags
-
-  lifecycle {
-    ignore_changes = [desired_count]
-  }
-}
-
-# ── ECS Service: Redis ────────────────────────────────────────
-# Runs 1 task. Reachable by other services as "redis:6379"
-resource "aws_ecs_service" "redis" {
-  name            = "${var.project}-redis"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.redis.arn
-  desired_count   = 1
-
-  capacity_provider_strategy {
-    capacity_provider = "FARGATE"
-    weight            = 1
-    base              = 1
-  }
-
-  network_configuration {
-    subnets          = var.private_subnet_ids
-    security_groups  = [aws_security_group.redis.id]
-    assign_public_ip = false
-  }
-
-  service_connect_configuration {
-    enabled   = true
-    namespace = aws_service_discovery_private_dns_namespace.main.arn
-
-    service {
-      port_name = "redis-port"
-      client_alias {
-        port     = 6379
-        dns_name = "redis"
-      }
-    }
-  }
-
-  deployment_circuit_breaker {
-    enable   = true
-    rollback = true
-  }
-
-  tags = var.tags
-
-  lifecycle {
-    ignore_changes = [desired_count]
-  }
-}
-
 # ── ECS Service: Backend ──────────────────────────────────────
 # Reachable by frontend as "backend:5000" via Service Connect.
-# Also a client — connects to postgres:5432 and redis:6379.
+# Connects to RDS and ElastiCache using their managed endpoints.
 # Jenkins redeploys this by updating the task definition revision.
 resource "aws_ecs_service" "backend" {
   name            = "${var.project}-backend"
@@ -617,7 +479,8 @@ resource "aws_ecs_service" "backend" {
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
-  depends_on = [aws_ecs_service.postgres, aws_ecs_service.redis]
+  # Wait for managed data services to be ready before first deploy
+  depends_on = [aws_db_instance.main, aws_elasticache_replication_group.main]
 
   tags = var.tags
 
@@ -627,8 +490,8 @@ resource "aws_ecs_service" "backend" {
 }
 
 # ── ECS Service: Frontend ─────────────────────────────────────
-# Sits behind the ALB. Client only — connects to backend:5000.
-# Jenkins redeploys this on new image push.
+# Sits behind the ALB. Client only — connects to backend:5000
+# via Service Connect.
 resource "aws_ecs_service" "frontend" {
   name            = "${var.project}-frontend"
   cluster         = aws_ecs_cluster.main.id
