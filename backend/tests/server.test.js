@@ -17,7 +17,7 @@ cache.get.mockResolvedValue(null);   // cache miss by default
 cache.setEx.mockResolvedValue(true);
 cache.quit.mockResolvedValue();
 
-process.env.PORT = '5001';
+process.env.PORT = '0'; // 0 = OS picks a free port, avoids conflicts with running containers
 process.env.DATABASE_URL = 'postgresql://mock:mock@localhost:5432/mock';
 process.env.REDIS_URL    = 'redis://localhost:6379/0';
 
