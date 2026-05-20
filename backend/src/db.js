@@ -2,11 +2,14 @@
 
 const { Pool } = require('pg');
 
+const isRDS = (process.env.DATABASE_URL || '').includes('rds.amazonaws.com');
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://shopnow:shopnow@postgres:5432/shopnow',
   max:              10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
+  ssl: isRDS ? { rejectUnauthorized: false } : false,
 });
 
 pool.on('error', (err) => {
