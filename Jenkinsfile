@@ -145,6 +145,11 @@ pipeline {
         stage('ECR Login') {
             steps {
                 sh """
+                    set -e
+                    echo "── Verifying AWS credentials ──"
+                    aws sts get-caller-identity
+
+                    echo "── Logging in to ECR ──"
                     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
                     docker login --username AWS --password-stdin ${ECR_REGISTRY}
                 """
