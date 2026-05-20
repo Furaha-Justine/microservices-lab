@@ -168,7 +168,7 @@ pipeline {
                             docker build \
                                 --platform linux/amd64 \
                                 --target production \
-                                --cache-from ${ECR_REGISTRY}/${PROJECT}/frontend:latest \
+                                --no-cache \
                                 -t ${FRONTEND_IMAGE} \
                                 -t ${ECR_REGISTRY}/${PROJECT}/frontend:latest \
                                 frontend/
