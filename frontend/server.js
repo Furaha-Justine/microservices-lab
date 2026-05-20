@@ -12,18 +12,21 @@ const PORT = process.env.PORT || 3000;
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:5000';
 
+const cspDefaults = helmet.contentSecurityPolicy.getDefaultDirectives();
+delete cspDefaults['upgrade-insecure-requests']; // no HTTPS on ALB — keep requests as HTTP
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
-      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      ...cspDefaults,
       'script-src':  ["'self'", "'unsafe-inline'"],
       'style-src':   ["'self'", "'unsafe-inline'"],
       'img-src':     ["'self'", 'data:'],
       'connect-src': ["'self'"],
     },
   },
-  crossOriginOpenerPolicy:   false,
-  strictTransportSecurity:  false, // no HTTPS on ALB yet — HSTS would break all API calls
+  crossOriginOpenerPolicy: false,
+  strictTransportSecurity: false,
 }));
 app.use(morgan('combined'));
 app.use(express.json());
