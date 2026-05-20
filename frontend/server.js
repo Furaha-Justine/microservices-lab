@@ -22,7 +22,8 @@ app.use(helmet({
       'connect-src': ["'self'"],
     },
   },
-  crossOriginOpenerPolicy: false,
+  crossOriginOpenerPolicy:   false,
+  strictTransportSecurity:  false, // no HTTPS on ALB yet — HSTS would break all API calls
 }));
 app.use(morgan('combined'));
 app.use(express.json());
