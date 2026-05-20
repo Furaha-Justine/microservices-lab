@@ -1,429 +1,484 @@
-# ShopNow — AWS ECS Fargate (Full Project)
+# ShopNow — AWS ECS Fargate
 
-> A production-grade 3-tier e-commerce application containerised with Docker and
-> deployed exclusively on **AWS ECS Fargate** with service discovery (Cloud Map),
-> load balancing (ALB), auto-scaling, full test coverage, and demonstrated resiliency.
-
----
-
-## Table of Contents
-
-1. [Architecture Overview](#1-architecture-overview)
-2. [Repository Structure](#2-repository-structure)
-3. [Application Tiers](#3-application-tiers)
-4. [Containerisation](#4-containerisation)
-5. [Local Development](#5-local-development)
-6. [Infrastructure as Code](#6-infrastructure-as-code)
-7. [ECS Fargate Deployment](#7-ecs-fargate-deployment)
-8. [Service Discovery — AWS Cloud Map](#8-service-discovery--aws-cloud-map)
-9. [Load Balancing — ALB](#9-load-balancing--alb)
-10. [Auto-Scaling](#10-auto-scaling)
-11. [Resiliency Demonstration](#11-resiliency-demonstration)
-12. [CI/CD Pipeline](#12-cicd-pipeline)
-13. [Monitoring & Observability](#13-monitoring--observability)
-14. [Security Hardening](#14-security-hardening)
-15. [Live Walkthrough Script](#15-live-walkthrough-script)
+A production-grade e-commerce application built with Node.js, containerised with Docker,
+and deployed on **AWS ECS Fargate** with managed RDS PostgreSQL, ElastiCache Redis,
+Application Load Balancer, Service Connect, and a Jenkins CI/CD pipeline.
 
 ---
 
-## 1. Architecture Overview
+## Architecture
 
 ```
-                     ┌──────────────────────────┐
-                     │         Internet          │
-                     └──────────────┬────────────┘
-                                    │ HTTP / HTTPS
-                     ┌──────────────▼────────────┐
-                     │  Application Load Balancer │
-                     │  internet-facing · port 80 │
-                     │  public subnets · 3 AZs    │
-                     └──────────────┬────────────┘
-                                    │ port 3000
-          ┌─────────────────────────▼──────────────────────┐
-          │             Frontend ECS Service                │
-          │       2 Fargate tasks · Node.js 20              │
-          │       private subnets · spread across AZs       │
-          └─────────────────────────┬──────────────────────┘
-                                    │ http://backend.shopnow.local:5000
-                                    │ (AWS Cloud Map DNS)
-          ┌─────────────────────────▼──────────────────────┐
-          │              Backend ECS Service                │
-          │       2 Fargate tasks · Node.js 20/Express     │
-          │       private subnets · spread across AZs       │
-          └──────────────┬──────────────────┬──────────────┘
-                         │                  │
-          ┌──────────────▼──────┐  ┌────────▼───────────────┐
-          │  RDS PostgreSQL 16  │  │  ElastiCache Redis 7    │
-          │  Multi-AZ · TLS     │  │  TLS · 2 nodes (prod)   │
-          │  private subnets    │  │  private subnets         │
-          └─────────────────────┘  └────────────────────────┘
+                         Internet
+                             │
+                    ┌────────▼─────────┐
+                    │       ALB        │  public subnets
+                    │  internet-facing │  port 80
+                    └────────┬─────────┘
+                             │ port 3000
+               ┌─────────────▼────────────┐
+               │     Frontend ECS Service  │  private subnets
+               │   Node.js 20 · Express    │  2 Fargate tasks
+               └─────────────┬────────────┘
+                             │ Service Connect
+                             │ http://backend:5000
+               ┌─────────────▼────────────┐
+               │     Backend ECS Service   │  private subnets
+               │   Node.js 20 · Express    │  2 Fargate tasks
+               └──────┬──────────┬─────────┘
+                      │          │
+           ┌──────────▼───┐  ┌───▼──────────────┐
+           │     RDS       │  │   ElastiCache     │
+           │  PostgreSQL   │  │     Redis 7       │
+           │   port 5432   │  │    port 6379      │
+           └───────────────┘  └──────────────────┘
 ```
+
+All ECS services, RDS, and ElastiCache run in **private subnets** — nothing is publicly accessible except the ALB.
 
 ---
 
-## 2. Repository Structure
+## How ECS Works in This Project
+
+### Fargate — no servers to manage
+
+This project uses the **Fargate launch type**, not EC2. That means there are no virtual machines to provision, patch, or manage. You define how much CPU and memory each container needs, and AWS handles the rest — finding capacity, starting the container, and cleaning up when it stops.
+
+Each task runs in a **private subnet** with no public IP. The only entry point into the system is the ALB.
+
+### awsvpc networking — each task gets its own IP
+
+ECS tasks here use `awsvpc` network mode. Instead of sharing a host's network interface, each task gets its own **Elastic Network Interface (ENI)** with its own private IP address. This means:
+
+- Security groups apply directly to the task, not the host
+- The ALB routes traffic directly to the task's IP (target group type: `ip`)
+- No port mapping conflicts — two tasks on the same container port never collide
+
+### Task Definitions — the blueprint
+
+A task definition describes what to run and how. For this project:
+
+```
+Frontend task definition
+  ├── Container: frontend (Node.js)
+  ├── Port: 3000
+  ├── CPU: 256 units (0.25 vCPU)
+  ├── Memory: 512 MB
+  ├── Network mode: awsvpc
+  ├── Log driver: awslogs → /ecs/shopnow/frontend
+  └── Env vars: BACKEND_URL, PORT
+
+Backend task definition
+  ├── Container: backend (Node.js)
+  ├── Port: 5000
+  ├── CPU: 512 units (0.5 vCPU)
+  ├── Memory: 1024 MB
+  ├── Network mode: awsvpc
+  ├── Log driver: awslogs → /ecs/shopnow/backend
+  └── Env vars: DATABASE_URL (RDS), REDIS_URL (ElastiCache), CACHE_TTL
+```
+
+Jenkins deploys a new version by registering a new **task definition revision** (with the updated ECR image) and then calling `update-service` to point to it. ECS handles the rollout.
+
+### ECS Services — keep N tasks running
+
+An ECS Service wraps a task definition and ensures the desired number of tasks are always running. If a task crashes, the service scheduler starts a replacement automatically.
+
+Both services are configured with:
+```
+desired_count              = 2       ← always 2 tasks running
+min_healthy_percent        = 100     ← never kill a task before a replacement is healthy
+max_percent                = 200     ← allows 4 tasks during a rolling deploy (2 old + 2 new)
+deployment_circuit_breaker = enabled ← auto-rollback if new tasks fail health checks
+```
+
+### Rolling deployments
+
+When Jenkins pushes a new image:
+
+```
+Before deploy:   [task v1] [task v1]         (2 running)
+
+During deploy:   [task v1] [task v1]
+                 [task v2] [task v2]          (4 running — max 200%)
+
+After healthy:   [task v2] [task v2]         (2 running — old tasks drained and stopped)
+```
+
+The ALB only sends traffic to tasks that pass their health check (`GET /health → 200`). Users never see a failed task.
+
+### Circuit Breaker — automatic rollback
+
+If the new tasks fail their health checks during a deployment, ECS automatically rolls back to the previous task definition revision. No manual intervention needed.
+
+### Service Connect — internal service discovery
+
+Frontend tasks reach the backend using `http://backend:5000` — no IPs, no hardcoded hostnames. Service Connect (built on AWS Cloud Map) handles the DNS resolution:
+
+```
+Frontend task
+  → http://backend:5000
+  → Service Connect resolves "backend" to a healthy backend task IP
+  → Request delivered to backend container
+```
+
+When a backend task starts, ECS registers its IP. When it stops or fails health checks, ECS deregisters it. The frontend always connects to a healthy task.
+
+### Auto Scaling — scale on CPU
+
+Both services scale automatically based on CPU utilisation:
+
+```
+CPU ≥ 70%  →  scale out (add tasks, 60s cooldown)
+CPU < 70%  →  scale in  (remove tasks, 300s cooldown)
+Min tasks: 2  |  Max tasks: 10
+```
+
+The 300s scale-in cooldown prevents flapping — tasks aren't removed the moment a burst ends.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Node.js 20, Express — serves static HTML/JS, proxies API to backend |
+| Backend | Node.js 20, Express — REST API, business logic, DB queries |
+| Database | RDS PostgreSQL 16 — managed, private subnet, automated backups |
+| Cache | ElastiCache Redis 7 — managed, caches product listings (60s TTL) |
+| Container runtime | AWS ECS Fargate — serverless containers, no EC2 to manage |
+| Load balancer | AWS ALB — internet-facing, health checks, target group type: IP |
+| Service discovery | AWS Service Connect (Cloud Map) — frontend reaches backend via `backend:5000` |
+| Infrastructure | Terraform — all AWS resources defined as code |
+| CI/CD | Jenkins — test → build → push to ECR → deploy to ECS |
+
+---
+
+## Repository Structure
 
 ```
 shopnow/
 ├── frontend/
-│   ├── Dockerfile                  # Multi-stage Node.js 20 build
-│   ├── package.json                # Deps + jest config
-│   ├── server.js                   # Express: proxy, health, rate-limit
-│   ├── public/index.html           # Single-page storefront
-│   └── tests/server.test.js        # Jest unit tests (health, proxy, cart)
+│   ├── Dockerfile               # Multi-stage Node.js 20 build
+│   ├── server.js                # Express: proxy, static files, health check, rate limit
+│   ├── public/index.html        # Single-page storefront (vanilla JS)
+│   └── tests/                   # Jest unit tests
 │
 ├── backend/
-│   ├── Dockerfile                  # Multi-stage Node.js 20 build
-│   ├── requirements.txt            # Express, SQLAlchemy, Redis, Prometheus
-│   ├── package.json devDependencies — jest, supertest
-│   └── app/
-│       ├── __init__.py
-│       ├── main.py                 # Express routes, DB init, Redis cache
-│       └── tests/
-│           ├── __init__.py
-│           └── server.test.js  # Jest: health, products, cart, cache
+│   ├── Dockerfile               # Multi-stage Node.js 20 build
+│   ├── src/
+│   │   ├── server.js            # Express routes: products, cart, orders, wishlist, reviews
+│   │   ├── db.js                # PostgreSQL pool, schema init, seed data
+│   │   └── cache.js             # Redis client with graceful fallback
+│   └── tests/                   # Jest unit tests
 │
-├── docker-compose.yml              # Full 4-service local stack
-├── .env.example                    # Safe local env template
-├── .gitignore
+├── docker-compose.yml           # Local dev stack (Postgres + Redis + backend + frontend)
+├── Jenkinsfile                  # CI/CD pipeline: test → build → push → deploy → verify
 │
-├── infrastructure/
-│   └── terraform/
-│       ├── bootstrap/            # S3 state bucket + DynamoDB lock table
-│       ├── modules/
-│       │   ├── vpc/                # VPC, subnets, NAT GWs, Flow Logs
-│       │   ├── ecs/                # Cluster, tasks, services, ALB, Cloud Map, scaling
-│       │   ├── rds/                # PostgreSQL 16, parameter group, alarms
-│       │   └── elasticache/        # Redis 7, TLS, slow-log, alarms
-│       └── environments/
-│           ├── prod/               # Multi-AZ, 2 tasks, full capacity
-│           │   ├── main.tf
-│           │   ├── variables.tf
-│           │   ├── outputs.tf
-│           │   └── terraform.tfvars.example
-│           └── staging/            # Single-AZ, 1 task, t3.micro
-│               └── main.tf
-│
-└── .github/
-    └── workflows/
-        ├── deploy.yml              # test → build → deploy to ECS
-        └── terraform-validate.yml  # fmt + validate on PRs touching Terraform
+└── infrastructure/terraform/
+    ├── bootstrap/               # S3 state bucket + DynamoDB lock table (run once)
+    ├── modules/
+    │   ├── vpc/                 # VPC, public/private subnets, NAT gateways, Flow Logs
+    │   ├── ecs/                 # Cluster, task definitions, services, ALB, RDS, ElastiCache
+    │   ├── iam/                 # Jenkins CI/CD IAM user and access keys
+    │   └── bastion/             # EC2 bastion host for SSH tunnel to RDS
+    └── environments/
+        └── prod/                # Production environment wiring all modules together
 ```
 
 ---
 
-## 3. Application Tiers
+## API Endpoints
 
-| Tier | Technology | Port | Responsibility |
-|------|-----------|------|----------------|
-| Frontend | Node.js 20 + Express | 3000 | Serves HTML/JS, proxies API calls to backend |
-| Backend API | Node.js 20 + Express | 5000 | REST endpoints, business logic, DB, Redis cache |
-| Cache | Redis 7 | 6379 | Product list cache, 60 s TTL, reduces DB load |
-| Database | PostgreSQL 16 | 5432 | Products and cart tables |
-
-**Backend API endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /health | Liveness check — always fast |
-| GET | /ready | Readiness — verifies DB + Redis |
-| GET | /metrics | Prometheus metrics |
-| GET | /api/products | Product list (Redis-cached) |
-| GET | /api/products/{id} | Single product |
-| POST | /api/cart | Add item to cart |
-| GET | /api/cart/{session_id} | View cart |
-
----
-
-## 4. Containerisation
-
-### Multi-stage builds
-
-```
-Frontend (node:20-alpine)            Backend (node:20-alpine)
-──────────────────────────           ───────────────────────────────
-Stage 1 — builder:                   Stage 1 — builder:
-  npm ci --only=production             apt: gcc libpq-dev
-  npm run build                        npm ci --only=production
-
-Stage 2 — production:                Stage 2 — production:
-  COPY --from=builder                  COPY from builder
-  adduser appuser UID 1001             non-root user UID 1001
-  EXPOSE 3000                          adduser appuser UID 1001
-  HEALTHCHECK wget /health             EXPOSE 5000
-  STOPSIGNAL SIGTERM                   HEALTHCHECK wget /health
-  CMD node server.js                   STOPSIGNAL SIGTERM
-                                       CMD uvicorn --workers 2
-```
-
-| Image | Naive | Multi-stage | Saving |
-|-------|-------|-------------|--------|
-| Frontend | ~400 MB | ~120 MB | 70% |
-| Backend | ~850 MB | ~180 MB | 79% |
-
-Security properties in every image: non-root UID 1001, SIGTERM graceful drain, HEALTHCHECK gates traffic, no compiler or dev tools in final layer.
+| Method | Path | Description | Cached |
+|---|---|---|---|
+| GET | /health | Liveness check | No |
+| GET | /ready | Readiness — checks DB + Redis | No |
+| GET | /metrics | Prometheus metrics | No |
+| GET | /api/products | List products (filter by category) | Yes — 60s |
+| GET | /api/products/search | Search products by keyword | No |
+| GET | /api/categories | List categories with counts | Yes — 5min |
+| GET | /api/products/:id | Single product with reviews summary | No |
+| POST | /api/products | Create product | No |
+| PUT | /api/products/:id | Update product | No |
+| DELETE | /api/products/:id | Delete product | No |
+| POST | /api/cart | Add item to cart | No |
+| GET | /api/cart/:session_id | View cart | No |
+| PUT | /api/cart/:session_id/item/:product_id | Update quantity | No |
+| DELETE | /api/cart/:session_id/item/:product_id | Remove item | No |
+| DELETE | /api/cart/:session_id | Clear cart | No |
+| POST | /api/orders | Checkout (converts cart to order) | No |
+| GET | /api/orders | List orders by session | No |
+| GET | /api/orders/:id | Order detail with items | No |
+| PUT | /api/orders/:id/status | Update order status | No |
+| POST | /api/products/:id/reviews | Submit review | No |
+| GET | /api/products/:id/reviews | Get reviews | No |
+| POST | /api/wishlist | Add to wishlist | No |
+| GET | /api/wishlist/:session_id | View wishlist | No |
+| DELETE | /api/wishlist/:session_id/item/:product_id | Remove from wishlist | No |
+| GET | /api/stats | Store-wide stats | No |
 
 ---
 
-## 5. Local Development
+## Local Development
+
+### Prerequisites
+- Docker Desktop
+
+### Run the full stack
 
 ```bash
-git clone https://github.com/your-org/shopnow.git
-cd shopnow
-cp .env.example .env
+git clone https://github.com/Furaha-Justine/microservices-lab.git
+cd microservices-lab
 
 docker compose up --build
-open http://localhost:3000
+```
 
-# Verify
-curl http://localhost:3000/health           # {"status":"ok","service":"frontend"}
-curl http://localhost:5000/ready            # {"status":"ready","checks":{...}}
-curl http://localhost:5000/api/products     # product list from DB
-curl -X POST http://localhost:5000/api/cart \
-  -H "Content-Type: application/json" \
-  -d '{"product_id":"p001","quantity":2,"session_id":"demo"}'
+Then open `http://localhost:3000`.
 
-# Run tests
+### Verify everything is healthy
+
+```bash
+curl http://localhost:3000/health          # frontend
+curl http://localhost:5001/health          # backend (direct)
+curl http://localhost:5001/ready           # checks DB + Redis
+curl http://localhost:5001/api/products    # product list from DB
+```
+
+### Run tests
+
+```bash
 cd frontend && npm ci && npm test
-cd ../backend && npm ci && npm test -- --verbose
+cd ../backend && npm ci && npm test
+```
 
-# Debug UIs
+### Debug UIs (optional)
+
+```bash
 docker compose --profile debug up -d
-# pgAdmin         → http://localhost:5050
-# Redis Commander → http://localhost:8081
 
-docker compose down -v
+# pgAdmin         → http://localhost:5050  (admin@shopnow.local / admin)
+# Redis Commander → http://localhost:8081
+```
+
+### Reset the database
+
+```bash
+docker compose down -v   # -v removes volumes (wipes DB)
+docker compose up --build
 ```
 
 ---
 
-## 6. Infrastructure as Code
+## Infrastructure — Terraform
 
-### Terraform module map
+### Step 1 — Bootstrap (run once ever)
 
-```
-environments/prod/main.tf
-  ├── module.vpc
-  │     10.0.0.0/16 · 3 public subnets (ALB) · 3 private (tasks/RDS/Redis)
-  │     3 NAT Gateways (1 per AZ) · VPC Flow Logs → CloudWatch 14 days
-  │
-  ├── aws_ecr_repository  (frontend + backend)
-  │     scan_on_push=true · lifecycle: keep last 10 images
-  │
-  ├── aws_sns_topic + subscription  (alarm notifications → email)
-  │
-  ├── module.rds
-  │     PostgreSQL 16 · gp3 encrypted · Performance Insights
-  │     Enhanced Monitoring · CloudWatch logs (postgresql + upgrade)
-  │     Alarms: CPU >80%, FreeStorage <5 GB
-  │
-  ├── module.elasticache
-  │     Redis 7 · allkeys-lru · TLS at-rest + in-transit
-  │     Slow-log → CloudWatch · Alarms: CPU >80%, Memory >85%
-  │
-  └── module.ecs
-        ECS Cluster (Container Insights enabled)
-        IAM: task execution role + task role
-        Security Groups: ALB → Frontend → Backend (least-privilege chain)
-        ALB + Target Group (type:ip) + HTTP Listener
-        Cloud Map: shopnow.local namespace + backend service
-        Task Definitions: frontend (0.25vCPU/512MB) + backend (0.5vCPU/1GB)
-        Services: desired=2, circuit breaker + rollback
-        App Auto Scaling: CPU ≥ 70% → scale out (min 2, max 10)
-```
-
-### Staging vs prod differences
-
-| | Prod | Staging |
-|-|------|---------|
-| AZs | 3 | 2 |
-| RDS | db.t3.medium, Multi-AZ | db.t3.micro, single-AZ |
-| Redis | 2 nodes, cache.t3.micro | 1 node, cache.t3.micro |
-| Tasks | 2 per service | 1 per service |
-| Task CPU/RAM | 512/1024 (backend) | 256/512 |
-
-### Bootstrap and deploy
+Creates the S3 bucket and DynamoDB table that store Terraform state.
 
 ```bash
-# Bootstrap the Terraform backend first
 cd infrastructure/terraform/bootstrap
 cp terraform.tfvars.example terraform.tfvars
 terraform init
 terraform apply
+```
 
-# Deploy infrastructure
-cd ../environments/prod
-cp terraform.tfvars.example terraform.tfvars  # fill in db_password, alarm_email
+### Step 2 — Create an EC2 key pair
+
+In the AWS Console → EC2 → Key Pairs → Create key pair:
+- Name: `shopnow-bastion`
+- Type: RSA, Format: .pem
+
+```bash
+mv ~/Downloads/shopnow-bastion.pem ~/.ssh/
+chmod 400 ~/.ssh/shopnow-bastion.pem
+```
+
+### Step 3 — Deploy prod
+
+```bash
+cd infrastructure/terraform/environments/prod
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars`:
+
+```hcl
+aws_region           = "eu-west-1"
+project              = "shopnow"
+environment          = "prod"
+vpc_cidr             = "10.0.0.0/16"
+postgres_password    = "yourStrongPassword"   # min 8 chars, no @/"/space
+bastion_key_name     = "shopnow-bastion"
+bastion_allowed_cidr = "YOUR_IP/32"           # curl https://checkip.amazonaws.com
+```
+
+```bash
 terraform init
 terraform plan
 terraform apply
-
-terraform output app_url         # → http://<alb-dns>
-terraform output ecs_cluster_name
 ```
 
-Terraform bootstrap resources are created by the dedicated stack in infrastructure/terraform/bootstrap.
-Jenkins handles build, push, deploy, and verification on push.
+### Outputs after apply
+
+```bash
+terraform output app_url                         # live site URL
+terraform output alb_dns_name                    # for Jenkins ALB_DNS
+terraform output ecr_frontend_url                # ECR image URL
+terraform output ecr_backend_url                 # ECR image URL
+terraform output jenkins_access_key_id           # for Jenkins credentials
+terraform output -raw jenkins_secret_access_key  # for Jenkins credentials
+terraform output bastion_ip                      # for SSH tunnel to RDS
+terraform output rds_endpoint                    # RDS hostname:port
+terraform output elasticache_address             # Redis hostname
+```
 
 ---
 
-## 7. ECS Fargate Deployment
+## Security Groups
 
-### Task definitions
-
-| | Frontend | Backend |
-|--|----------|---------|
-| CPU | 256 units (0.25 vCPU) | 512 units (0.5 vCPU) |
-| Memory | 512 MB | 1024 MB |
-| Network | awsvpc (own ENI per task) | awsvpc |
-| Key env var | `BACKEND_URL=http://backend.shopnow.local:5000` | `DATABASE_URL`, `REDIS_URL` |
-| Log group | /ecs/shopnow/frontend | /ecs/shopnow/backend |
-
-### Service settings (both services)
+Traffic is allowed only in one direction down the chain:
 
 ```
-desired_count              = 2
-capacity_provider          = FARGATE (base=1) + FARGATE_SPOT
-min_healthy_percent        = 100   ← never drop below desired count
-max_percent                = 200   ← surge to 4 tasks during deploy
-health_check_grace_period  = 60 s
-deployment_circuit_breaker = enabled + auto-rollback
+Internet       →  ALB SG        (port 80)
+ALB SG         →  Frontend SG   (port 3000)
+Frontend SG    →  Backend SG    (port 5000)
+Backend SG     →  RDS SG        (port 5432)
+Backend SG     →  ElastiCache SG (port 6379)
+Bastion SG     →  RDS SG        (port 5432)
+Your IP        →  Bastion SG    (port 22)
 ```
 
-### Build, push, and deploy
+---
+
+## Connecting to RDS
+
+RDS is in a private subnet and has no public access. Use the bastion host to SSH tunnel in:
 
 ```bash
-# Manual fallback only
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-REGION=us-east-1
+# Open the tunnel (keep this terminal running)
+ssh -L 5432:<rds-endpoint>:5432 ec2-user@<bastion-ip> \
+  -i ~/.ssh/shopnow-bastion.pem -N
 
-aws ecr get-login-password --region $REGION | \
-  docker login --username AWS --password-stdin \
-  $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+# In a new terminal, connect with psql
+psql -h localhost -U shopnow -d shopnow
+```
 
-docker build --target production \
-  -t $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/shopnow/backend:latest ./backend
-docker push $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/shopnow/backend:latest
+Replace `<rds-endpoint>` and `<bastion-ip>` with the values from `terraform output`.
 
-aws ecs update-service --cluster shopnow-ecs \
-  --service shopnow-backend --force-new-deployment
-aws ecs wait services-stable --cluster shopnow-ecs --services shopnow-backend
+---
 
-# Verify
-aws ecs describe-services --cluster shopnow-ecs \
+## CI/CD — Jenkins Pipeline
+
+### Stages
+
+```
+push to main
+    │
+    ├── Test (parallel)
+    │     ├── Backend tests  (npm ci + jest)
+    │     └── Frontend tests (npm ci + jest)
+    │
+    ├── ECR Login
+    │     aws ecr get-login-password | docker login
+    │
+    ├── Build & Push (parallel)
+    │     ├── docker build frontend → push to ECR
+    │     └── docker build backend  → push to ECR
+    │     (tagged with git SHA + :latest)
+    │
+    ├── Deploy Backend
+    │     Register new task definition revision → update ECS service → wait stable
+    │
+    ├── Deploy Frontend
+    │     Register new task definition revision → update ECS service → wait stable
+    │
+    └── Verify
+          Poll ALB /health until HTTP 200
+```
+
+### Jenkins setup (one-time)
+
+**1. Add AWS credentials**
+```
+Manage Jenkins → Credentials → Global → Add Credentials (×2)
+
+Kind: Secret text | ID: shopnow-aws-key-id     | Secret: <jenkins_access_key_id>
+Kind: Secret text | ID: shopnow-aws-secret-key | Secret: <jenkins_secret_access_key>
+```
+
+**2. Set ALB DNS global env var**
+```
+Manage Jenkins → System → Global properties → Environment variables
+
+Name: ALB_DNS   Value: <alb_dns_name from terraform output>
+```
+
+**3. Create pipeline job**
+```
+New Item → shopnow → Pipeline → OK
+
+Pipeline:
+  Definition: Pipeline script from SCM
+  SCM: Git
+  Repository URL: https://github.com/Furaha-Justine/microservices-lab.git
+  Branch: */main
+  Script Path: Jenkinsfile
+```
+
+---
+
+## ECS Services
+
+| | Frontend | Backend |
+|---|---|---|
+| CPU | 256 units (0.25 vCPU) | 512 units (0.5 vCPU) |
+| Memory | 512 MB | 1024 MB |
+| Desired tasks | 2 | 2 |
+| Auto-scale max | 10 | 10 |
+| Scale-out at | CPU ≥ 70% | CPU ≥ 70% |
+| Log group | /ecs/shopnow/frontend | /ecs/shopnow/backend |
+| Network | private subnets, no public IP | private subnets, no public IP |
+
+ECS circuit breaker is enabled on both services — a failed deployment automatically rolls back to the previous task definition revision.
+
+---
+
+## Service Connect
+
+The frontend reaches the backend using `http://backend:5000` — no hardcoded IPs.
+
+AWS Service Connect registers the backend service under the `shopnow.local` Cloud Map namespace. When a backend task starts, ECS registers its IP. When it stops, ECS deregisters it. The frontend always resolves `backend` to a healthy task.
+
+---
+
+## Monitoring
+
+```bash
+# Live logs
+aws logs tail /ecs/shopnow/backend  --follow --format short
+aws logs tail /ecs/shopnow/frontend --follow --format short
+
+# Service health
+aws ecs describe-services \
+  --cluster shopnow-cluster \
   --services shopnow-frontend shopnow-backend \
   --query 'services[].{Name:serviceName,Running:runningCount,Desired:desiredCount}' \
   --output table
+
+# Prometheus metrics (from within VPC or bastion)
+curl http://backend:5000/metrics
 ```
 
 ---
 
-## 8. Service Discovery — AWS Cloud Map
+## Resiliency
 
-Terraform creates a **private DNS namespace** `shopnow.local` inside the VPC. The backend ECS service registers into it as `backend`.
+To demonstrate ECS self-healing:
 
-**What happens at runtime:**
-- When a backend task starts → ECS registers its ENI IP as an `A` record under `backend.shopnow.local`
-- When a task stops or fails its health check → ECS deregisters its IP within 10 seconds (matching the TTL)
-- Routing policy is **MULTIVALUE** → all healthy task IPs returned in DNS responses
-
-**DNS resolution flow:**
-```
-Frontend task
-  → BACKEND_URL = "http://backend.shopnow.local:5000"
-  → getaddrinfo("backend.shopnow.local")
-  → Route 53 Resolver (169.254.169.253 — built into every VPC)
-  → Cloud Map returns: [10.0.2.45, 10.0.3.78]
-  → Node.js HTTP client connects to one IP:5000
-```
-
-**Verify:**
+**Terminal A — watch availability:**
 ```bash
-NS_ID=$(aws servicediscovery list-namespaces \
-  --query 'Namespaces[?Name==`shopnow.local`].Id' --output text)
-SVC_ID=$(aws servicediscovery list-services \
-  --filters Name=NAMESPACE_ID,Values=$NS_ID,Condition=EQ \
-  --query 'Services[?Name==`backend`].Id' --output text)
-aws servicediscovery list-instances --service-id $SVC_ID \
-  --query 'Instances[].Attributes.AWS_INSTANCE_IPV4'
-
-# From inside a running task
-aws ecs execute-command --cluster shopnow-ecs \
-  --task <TASK_ARN> --container frontend --interactive \
-  --command "nslookup backend.shopnow.local"
-```
-
----
-
-## 9. Load Balancing — ALB
-
-```
-ALB (shopnow-ecs-alb)
-  scheme:           internet-facing
-  subnets:          public subnets (all 3 AZs)
-  security group:   inbound 80 from 0.0.0.0/0
-
-Listener (port 80)
-  └─ Default action: forward → Frontend Target Group
-
-Frontend Target Group
-  type:             ip  (routes directly to task ENI IPs)
-  protocol/port:    HTTP:3000
-  health check:     GET /health → 200
-                    interval 30s · healthy threshold 2 · unhealthy threshold 3
-  deregistration:   30 s drain (in-flight connections finish cleanly)
-```
-
-**Security group chain:**
-```
-Internet       → ALB SG        (80, 443)
-ALB SG         → Frontend SG   (3000)
-Frontend SG    → Backend SG    (5000)
-VPC CIDR       → RDS SG        (5432)
-VPC CIDR       → Redis SG      (6379)
-```
-
----
-
-## 10. Auto-Scaling
-
-Both services use CPU-based target tracking via App Auto Scaling:
-
-| | Frontend | Backend |
-|--|----------|---------|
-| Min tasks | 2 | 2 |
-| Max tasks | 10 | 10 |
-| Scale-out at | CPU ≥ 70% | CPU ≥ 70% |
-| Scale-out cooldown | 60 s | 60 s |
-| Scale-in cooldown | 300 s | 300 s |
-
-The 300 s scale-in cooldown prevents flapping — tasks aren't removed the moment a burst ends.
-
-```bash
-# Watch scaling activity
-aws application-autoscaling describe-scaling-activities \
-  --service-namespace ecs \
-  --resource-id service/shopnow-ecs/shopnow-backend
-
-# Current counts
-aws ecs describe-services --cluster shopnow-ecs --services shopnow-backend \
-  --query 'services[0].{Running:runningCount,Desired:desiredCount,Pending:pendingCount}'
-```
-
----
-
-## 11. Resiliency Demonstration
-
-### Automated script
-
-```bash
-# Use the ECS console or Jenkins pipeline resiliency stage to demonstrate recovery.
-```
-
-### Manual — Terminal A (start first)
-```bash
-ALB=$(aws elbv2 describe-load-balancers --names shopnow-ecs-alb \
-  --query 'LoadBalancers[0].DNSName' --output text)
+ALB=shopnow-alb-575861398.eu-west-1.elb.amazonaws.com
 while true; do
   CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB/api/products")
   echo "$(date '+%H:%M:%S')  $CODE"
@@ -431,203 +486,15 @@ while true; do
 done
 ```
 
-### Manual — Terminal B (kill a task)
+**Terminal B — stop a task:**
 ```bash
-TASK=$(aws ecs list-tasks --cluster shopnow-ecs \
+TASK=$(aws ecs list-tasks --cluster shopnow-cluster \
   --service-name shopnow-backend --query 'taskArns[0]' --output text)
-aws ecs stop-task --cluster shopnow-ecs --task $TASK --reason "Resiliency demo"
-
-watch -n 2 "aws ecs describe-services --cluster shopnow-ecs \
-  --services shopnow-backend \
-  --query 'services[0].{Running:runningCount,Pending:pendingCount}'"
+aws ecs stop-task --cluster shopnow-cluster --task $TASK
 ```
 
-### Expected sequence
-
-```
-t=0s   stop-task → runningCount: 2 → 1
-t=2s   ECS scheduler: actual < desired → pendingCount=1
-t=20s  New task passes health check → Cloud Map registers new IP
-t=25s  runningCount: 2 restored
-
-Terminal A: uninterrupted 200 OK — zero failures
-```
-
-**Why zero downtime?** The ALB removes a task from its target group as soon as the health check fails — before the task is fully stopped. The surviving task handles all traffic while the replacement starts.
+ECS detects the task stopped, launches a replacement, and the ALB routes traffic to the surviving task. Terminal A shows no failed requests.
 
 ---
 
-## 12. CI/CD Pipeline
-
-```
-push to main (or staging)
-  │
-  ├─ test-frontend   (npm ci + jest --coverage)
-  ├─ test-backend    (npm ci + jest --coverage)
-  │
-  ├─ build           (only after both tests pass, only on main/staging)
-  │    docker buildx → ECR
-  │    tag: {branch}-{YYYYMMDD}-{SHA7} + :latest (or :staging)
-  │    both frontend and backend, with GHA layer caching
-  │
-  └─ deploy          (waits for build)
-       backend: update-service → wait services-stable
-       frontend: update-service → wait services-stable
-       smoke test: curl /health → assert 200
-       verify: describe-services table output
-```
-
-On pull requests: only tests run — no build, no deploy.
-
-Separate `terraform-validate.yml` workflow runs on every PR touching `infrastructure/terraform/`:
-- `terraform fmt -check` on all `.tf` files
-- `terraform init -backend=false` + `terraform validate` for both prod and staging
-
-**Required secret:** `AWS_ACCOUNT_ID` — everything else uses GitHub OIDC (no static keys).
-
----
-
-## 13. Monitoring & Observability
-
-```bash
-# Service health
-aws ecs describe-services --cluster shopnow-ecs \
-  --services shopnow-frontend shopnow-backend \
-  --query 'services[].{Name:serviceName,Running:runningCount,Status:status}' \
-  --output table
-
-# Live logs
-aws logs tail /ecs/shopnow/backend  --follow --format short
-aws logs tail /ecs/shopnow/frontend --follow --format short
-
-# CPU over last hour (Container Insights)
-aws cloudwatch get-metric-statistics \
-  --namespace ECS/ContainerInsights \
-  --metric-name CpuUtilized \
-  --dimensions Name=ClusterName,Value=shopnow-ecs \
-               Name=ServiceName,Value=shopnow-backend \
-  --start-time $(date -u -d '1 hour ago' +%FT%TZ) \
-  --end-time   $(date -u +%FT%TZ) \
-  --period 60 --statistics Average
-
-# Error count (Log Insights)
-aws logs start-query \
-  --log-group-name /ecs/shopnow/backend \
-  --start-time $(date -d '1 hour ago' +%s) --end-time $(date +%s) \
-  --query-string 'filter @message like /ERROR/ | stats count()'
-
-# Deployment events
-aws ecs describe-services --cluster shopnow-ecs --services shopnow-backend \
-  --query 'services[0].events[:5]'
-
-# RDS + Redis alarms (created automatically by Terraform modules)
-aws cloudwatch describe-alarms \
-  --alarm-name-prefix shopnow \
-  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}'
-```
-
-Prometheus metrics available at `GET /metrics` on the backend (port 5000). Scrape from within the VPC or via ECS Exec.
-
----
-
-## 14. Security Hardening
-
-### Implemented
-
-- [x] Non-root containers (UID 1001)
-- [x] Multi-stage builds — no compiler or dev tools in prod images
-- [x] ECR `scan_on_push = true` — vulnerabilities caught before deploy
-- [x] ECR lifecycle policy — max 10 images, old ones auto-purged
-- [x] All ECS tasks in private subnets (no public IPs)
-- [x] Least-privilege security group chain (ALB → Frontend → Backend)
-- [x] RDS: AES-256 at-rest encryption, Multi-AZ, TLS in transit
-- [x] ElastiCache: TLS at-rest + in-transit (`rediss://`)
-- [x] VPC Flow Logs → CloudWatch (14-day retention, all traffic)
-- [x] GitHub OIDC — no long-lived AWS credentials stored anywhere
-- [x] Terraform state: S3 encrypted + DynamoDB lock
-- [x] Container Insights + RDS Enhanced Monitoring
-- [x] CloudWatch alarms: RDS CPU, RDS storage, Redis CPU, Redis memory
-- [x] SNS → email notifications for alarms
-
-### Recommended before production launch
-
-- [ ] AWS WAF on ALB — rate limiting, SQLi/XSS protection
-- [ ] AWS Secrets Manager + ECS secrets reference — replace plaintext env vars
-- [ ] VPC Endpoints for ECR, CloudWatch, S3 — eliminate NAT for AWS API calls
-- [ ] AWS GuardDuty — runtime threat detection
-- [ ] HTTPS listener on ALB + ACM certificate
-
----
-
-## 15. Live Walkthrough Script
-
-```bash
-# ══════════════════════════════════════════════════════
-# PART 1 — Local Docker stack
-# ══════════════════════════════════════════════════════
-cd shopnow
-docker compose up --build -d
-docker compose ps                          # All 4 services Up + healthy
-docker images | grep shopnow              # Show multi-stage size savings
-curl http://localhost:3000/health
-curl http://localhost:5000/ready
-open http://localhost:3000
-
-# ══════════════════════════════════════════════════════
-# PART 2 — Tests
-# ══════════════════════════════════════════════════════
-cd frontend && npm test -- --verbose 2>&1 | tail -15
-cd ../backend && npm test -- --verbose 2>&1 | tail -15
-
-# ══════════════════════════════════════════════════════
-# PART 3 — Terraform plan
-# ══════════════════════════════════════════════════════
-cd ../infrastructure/terraform/environments/prod
-terraform init && terraform plan -var="db_password=demo" 2>&1 | \
-  grep -E "^(Plan| \+)" | head -20
-
-# ══════════════════════════════════════════════════════
-# PART 4 — Live ECS cluster
-# ══════════════════════════════════════════════════════
-aws ecs describe-services --cluster shopnow-ecs \
-  --services shopnow-frontend shopnow-backend \
-  --query 'services[].{Name:serviceName,Running:runningCount,Desired:desiredCount}' \
-  --output table
-
-ALB=$(aws elbv2 describe-load-balancers --names shopnow-ecs-alb \
-  --query 'LoadBalancers[0].DNSName' --output text)
-open http://$ALB
-
-# Show Cloud Map registrations
-NS_ID=$(aws servicediscovery list-namespaces \
-  --query 'Namespaces[?Name==`shopnow.local`].Id' --output text)
-SVC_ID=$(aws servicediscovery list-services \
-  --filters Name=NAMESPACE_ID,Values=$NS_ID,Condition=EQ \
-  --query 'Services[?Name==`backend`].Id' --output text)
-aws servicediscovery list-instances --service-id $SVC_ID \
-  --query 'Instances[].Attributes.AWS_INSTANCE_IPV4'
-
-# ══════════════════════════════════════════════════════
-# PART 5 — Resiliency demo
-# ══════════════════════════════════════════════════════
-
-# Terminal A: availability poller
-while true; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB/api/products")
-  echo "$(date '+%H:%M:%S')  $CODE"; sleep 1
-done
-
-# Terminal B: stop one ECS task from the AWS Console, then watch ECS replace it
-# Output: recovery in ~seconds | app continues serving requests
-
-# ══════════════════════════════════════════════════════
-# PART 6 — Trigger CI/CD
-# ══════════════════════════════════════════════════════
-git commit --allow-empty -m "chore: pipeline demo"
-git push origin main
-# Jenkins: tests → build → push → deploy → verify
-```
-
----
-
-*ShopNow · ECS Fargate · Production-grade DevOps project*
+*ShopNow — ECS Fargate · RDS · ElastiCache · Jenkins · Terraform*

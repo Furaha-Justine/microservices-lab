@@ -12,7 +12,18 @@ const PORT = process.env.PORT || 3000;
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://backend:5000';
 
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      'script-src':  ["'self'", "'unsafe-inline'"],
+      'style-src':   ["'self'", "'unsafe-inline'"],
+      'img-src':     ["'self'", 'data:'],
+      'connect-src': ["'self'"],
+    },
+  },
+  crossOriginOpenerPolicy: false,
+}));
 app.use(morgan('combined'));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
