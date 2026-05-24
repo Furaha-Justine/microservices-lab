@@ -1,0 +1,272 @@
+
+
+
+pipeline {
+    agent any
+
+    environment {
+        PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${env.PATH}"
+
+        AWS_ACCESS_KEY_ID     = credentials('shopnow-aws-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('shopnow-aws-secret-key')
+        AWS_DEFAULT_REGION    = 'eu-west-1'
+
+        RDS_PASSWORD = credentials('shopnow-eks-rds-password')
+
+        PROJECT       = 'shopnow'
+        K8S_NAMESPACE = 'shopnow'
+
+        // Set in Jenkins → Manage Jenkins → System → Global properties
+        // EKS_CLUSTER = 'shopnow-eks-cluster'
+        // EKS_ALB_DNS = '<alb dns from kubectl get ingress>'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 40, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        // ── Stage 1: Checkout ─────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.IMAGE_TAG = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.AWS_ACCOUNT_ID = sh(
+                        script: 'aws sts get-caller-identity --query Account --output text',
+                        returnStdout: true
+                    ).trim()
+
+                    env.ECR_REGISTRY    = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_DEFAULT_REGION}.amazonaws.com"
+                    env.FRONTEND_IMAGE  = "${env.ECR_REGISTRY}/${env.PROJECT}/frontend:${env.IMAGE_TAG}"
+                    env.BACKEND_IMAGE   = "${env.ECR_REGISTRY}/${env.PROJECT}/backend:${env.IMAGE_TAG}"
+
+                    echo "Branch:       ${env.GIT_BRANCH}"
+                    echo "Image tag:    ${env.IMAGE_TAG}"
+                    echo "ECR registry: ${env.ECR_REGISTRY}"
+                }
+            }
+        }
+
+        // ── Stage 2: Tests ────────────────────────────────────
+        stage('Test') {
+            parallel {
+                stage('Backend tests') {
+                    steps {
+                        dir('backend') {
+                            sh 'npm ci --prefer-offline'
+                            sh 'npm test -- --forceExit --ci'
+                        }
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'backend/coverage/**/*.xml'
+                        }
+                    }
+                }
+
+                stage('Frontend tests') {
+                    steps {
+                        dir('frontend') {
+                            sh 'npm ci --prefer-offline'
+                            sh 'npm test -- --forceExit --ci'
+                        }
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true,
+                                  testResults: 'frontend/coverage/**/*.xml'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 3: ECR Login ────────────────────────────────
+        stage('ECR Login') {
+            steps {
+                sh """
+                    set -e
+                    aws sts get-caller-identity
+                    aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | \
+                    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                """
+            }
+        }
+
+        // ── Stage 4: Build & Push ─────────────────────────────
+        stage('Build & Push') {
+            parallel {
+                stage('Frontend image') {
+                    steps {
+                        sh """
+                            docker build \
+                                --platform linux/amd64 \
+                                --target production \
+                                --no-cache \
+                                -t ${FRONTEND_IMAGE} \
+                                -t ${ECR_REGISTRY}/${PROJECT}/frontend:latest \
+                                frontend/
+
+                            docker push ${FRONTEND_IMAGE}
+                            docker push ${ECR_REGISTRY}/${PROJECT}/frontend:latest
+                        """
+                    }
+                }
+
+                stage('Backend image') {
+                    steps {
+                        sh """
+                            docker build \
+                                --platform linux/amd64 \
+                                --target production \
+                                --cache-from ${ECR_REGISTRY}/${PROJECT}/backend:latest \
+                                -t ${BACKEND_IMAGE} \
+                                -t ${ECR_REGISTRY}/${PROJECT}/backend:latest \
+                                backend/
+
+                            docker push ${BACKEND_IMAGE}
+                            docker push ${ECR_REGISTRY}/${PROJECT}/backend:latest
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 5: Configure kubectl ────────────────────────
+        stage('Configure kubectl') {
+            steps {
+                sh """
+                    aws eks update-kubeconfig \
+                        --name ${EKS_CLUSTER} \
+                        --region ${AWS_DEFAULT_REGION}
+                    kubectl cluster-info
+                """
+            }
+        }
+
+        // ── Stage 6: Create / update secrets ──────────────────
+        // Fetches RDS and ElastiCache endpoints from AWS and creates
+        // the Kubernetes secret the backend pods read from.
+        stage('Secrets') {
+            steps {
+                sh """
+                    set -e
+
+                    RDS_HOST=\$(aws rds describe-db-instances \
+                        --db-instance-identifier shopnow-eks-postgres \
+                        --query 'DBInstances[0].Endpoint.Address' \
+                        --output text)
+
+                    REDIS_HOST=\$(aws elasticache describe-replication-groups \
+                        --replication-group-id shopnow-eks-redis \
+                        --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' \
+                        --output text)
+
+                    kubectl create namespace ${K8S_NAMESPACE} \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                    kubectl create secret generic backend-secrets \
+                        --namespace ${K8S_NAMESPACE} \
+                        --from-literal=database-url="postgresql://shopnow:\${RDS_PASSWORD}@\${RDS_HOST}:5432/shopnow?sslmode=require" \
+                        --from-literal=redis-url="redis://\${REDIS_HOST}:6379/0" \
+                        --dry-run=client -o yaml | kubectl apply -f -
+                """
+            }
+        }
+
+        // ── Stage 7: Deploy ───────────────────────────────────
+        // Applies all k8s manifests, substituting the correct image tags.
+        stage('Deploy') {
+            steps {
+                sh """
+                    set -e
+
+                    kubectl apply -f k8s/namespace.yaml
+
+                    # Apply services and HPA (image-independent)
+                    kubectl apply -f k8s/backend/service.yaml
+                    kubectl apply -f k8s/frontend/service.yaml
+                    kubectl apply -f k8s/backend/hpa.yaml
+                    kubectl apply -f k8s/frontend/hpa.yaml
+                    kubectl apply -f k8s/ingress.yaml
+
+                    # Inject image tags then apply deployments
+                    sed 's|BACKEND_IMAGE|${BACKEND_IMAGE}|g'  k8s/backend/deployment.yaml  | kubectl apply -f -
+                    sed 's|FRONTEND_IMAGE|${FRONTEND_IMAGE}|g' k8s/frontend/deployment.yaml | kubectl apply -f -
+
+                    # Wait for rollout
+                    kubectl rollout status deployment/backend  -n ${K8S_NAMESPACE} --timeout=5m
+                    kubectl rollout status deployment/frontend -n ${K8S_NAMESPACE} --timeout=5m
+
+                    echo "── Deployment complete ──"
+                    kubectl get pods -n ${K8S_NAMESPACE}
+                """
+            }
+        }
+
+        // ── Stage 8: Verify ───────────────────────────────────
+        stage('Verify') {
+            steps {
+                script {
+                    if (!env.EKS_ALB_DNS) {
+                        echo "EKS_ALB_DNS not set — skipping live health check."
+                        echo "After first deploy run: kubectl get ingress -n shopnow"
+                        echo "Then set EKS_ALB_DNS in Jenkins → System → Global properties."
+                        return
+                    }
+                }
+                sh """
+                    RETRIES=12
+                    for i in \$(seq 1 \$RETRIES); do
+                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
+                            --max-time 10 \
+                            http://${EKS_ALB_DNS}/health || echo "000")
+                        echo "Attempt \$i/\$RETRIES → HTTP \$STATUS"
+                        if [ "\$STATUS" = "200" ]; then
+                            echo "✓ App is live at http://${EKS_ALB_DNS}"
+                            exit 0
+                        fi
+                        sleep 15
+                    done
+                    echo "Health check failed after \$RETRIES attempts."
+                    exit 1
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            ┌────────────────────────────────────────────────┐
+            │  EKS Deployment complete                       │
+            │  App:       http://${env.EKS_ALB_DNS ?: 'see EKS_ALB_DNS'}
+            │  Image tag: ${env.IMAGE_TAG}                  │
+            └────────────────────────────────────────────────┘
+            """
+        }
+
+        failure {
+            echo """
+            EKS deployment failed.
+            Check pod logs: kubectl logs -l app=backend -n shopnow
+                            kubectl logs -l app=frontend -n shopnow
+            Check events:   kubectl get events -n shopnow --sort-by='.lastTimestamp'
+            """
+        }
+
+        always {
+            sh 'docker logout ${ECR_REGISTRY} 2>/dev/null || true'
+            cleanWs()
+        }
+    }
+}
