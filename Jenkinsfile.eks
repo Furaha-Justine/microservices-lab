@@ -223,23 +223,23 @@ pipeline {
                         echo "Then set EKS_ALB_DNS in Jenkins → System → Global properties."
                         return
                     }
+                    sh """
+                        RETRIES=12
+                        for i in \$(seq 1 \$RETRIES); do
+                            STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
+                                --max-time 10 \
+                                http://${env.EKS_ALB_DNS}/health || echo "000")
+                            echo "Attempt \$i/\$RETRIES -> HTTP \$STATUS"
+                            if [ "\$STATUS" = "200" ]; then
+                                echo "App is live at http://${env.EKS_ALB_DNS}"
+                                exit 0
+                            fi
+                            sleep 15
+                        done
+                        echo "Health check failed after \$RETRIES attempts."
+                        exit 1
+                    """
                 }
-                sh """
-                    RETRIES=12
-                    for i in \$(seq 1 \$RETRIES); do
-                        STATUS=\$(curl -s -o /dev/null -w "%{http_code}" \
-                            --max-time 10 \
-                            http://${EKS_ALB_DNS}/health || echo "000")
-                        echo "Attempt \$i/\$RETRIES → HTTP \$STATUS"
-                        if [ "\$STATUS" = "200" ]; then
-                            echo "✓ App is live at http://${EKS_ALB_DNS}"
-                            exit 0
-                        fi
-                        sleep 15
-                    done
-                    echo "Health check failed after \$RETRIES attempts."
-                    exit 1
-                """
             }
         }
     }
