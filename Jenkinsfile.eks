@@ -176,7 +176,7 @@ pipeline {
 
                     kubectl create secret generic backend-secrets \
                         --namespace ${K8S_NAMESPACE} \
-                        --from-literal=database-url="postgresql://shopnow:\${RDS_PASSWORD}@\${RDS_HOST}:5432/shopnow?sslmode=require" \
+                        --from-literal=database-url="postgresql://shopnow:\${RDS_PASSWORD}@\${RDS_HOST}:5432/shopnow" \
                         --from-literal=redis-url="redis://\${REDIS_HOST}:6379/0" \
                         --dry-run=client -o yaml | kubectl apply -f -
                 """

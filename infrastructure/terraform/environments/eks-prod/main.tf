@@ -56,6 +56,16 @@ module "ecr" {
   tags             = local.common_tags
 }
 
+# ── IAM: Jenkins CI/CD ────────────────────────────────────────
+module "iam" {
+  source = "../../modules/iam"
+
+  project             = var.project
+  ecr_repository_arns = values(module.ecr.repository_arns)
+  ecs_task_role_arns  = []
+  tags                = local.common_tags
+}
+
 # ── EKS Cluster + RDS + ElastiCache ───────────────────────────
 module "eks" {
   source = "../../modules/eks"
@@ -83,15 +93,7 @@ module "eks" {
   elasticache_node_type    = var.elasticache_node_type
   elasticache_num_replicas = var.elasticache_num_replicas
 
+  jenkins_user_arn = module.iam.jenkins_user_arn
+
   tags = local.common_tags
-}
-
-# ── IAM: Jenkins CI/CD ────────────────────────────────────────
-module "iam" {
-  source = "../../modules/iam"
-
-  project             = var.project
-  ecr_repository_arns = values(module.ecr.repository_arns)
-  ecs_task_role_arns  = []
-  tags                = local.common_tags
 }

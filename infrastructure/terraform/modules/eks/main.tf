@@ -1,6 +1,10 @@
 # ── Data ──────────────────────────────────────────────────────
 data "aws_caller_identity" "current" {}
 
+data "aws_vpc" "main" {
+  id = var.vpc_id[0]
+}
+
 # ── EKS Cluster IAM Role ───────────────────────────────────────
 resource "aws_iam_role" "eks_cluster" {
   name = "${var.project}-eks-cluster-role"
@@ -42,6 +46,10 @@ resource "aws_eks_cluster" "main" {
   }
 
   enabled_cluster_log_types = ["api", "audit", "authenticator"]
+
+  access_config {
+    authentication_mode = "API_AND_CONFIG_MAP"
+  }
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy,
@@ -89,6 +97,7 @@ resource "aws_eks_node_group" "main" {
   node_role_arn   = aws_iam_role.eks_nodes.arn
   subnet_ids      = var.private_subnet_ids
   instance_types  = [var.node_instance_type]
+  ami_type        = "AL2023_x86_64_STANDARD"
 
   scaling_config {
     desired_size = var.node_desired_size
@@ -174,7 +183,7 @@ resource "aws_iam_user_policy" "jenkins_eks" {
 # Allow Jenkins to call aws eks update-kubeconfig + kubectl via EKS access entry
 resource "aws_eks_access_entry" "jenkins" {
   cluster_name  = aws_eks_cluster.main.name
-  principal_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/${var.project}-jenkins"
+  principal_arn = var.jenkins_user_arn
   type          = "STANDARD"
   tags          = var.tags
 }
@@ -255,15 +264,15 @@ resource "aws_security_group_rule" "cluster_ingress_nodes" {
 # ── RDS Security Group ─────────────────────────────────────────
 resource "aws_security_group" "rds" {
   name        = "${var.project}-eks-rds-sg"
-  description = "RDS PostgreSQL — pods only"
+  description = "RDS PostgreSQL pods only"
   vpc_id      = var.vpc_id[0]
 
   ingress {
-    description     = "Backend pods to RDS"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.eks_nodes.id]
+    description = "Backend pods to RDS"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.main.cidr_block]
   }
 
   egress {
@@ -279,15 +288,15 @@ resource "aws_security_group" "rds" {
 # ── ElastiCache Security Group ─────────────────────────────────
 resource "aws_security_group" "elasticache" {
   name        = "${var.project}-eks-elasticache-sg"
-  description = "ElastiCache Redis — pods only"
+  description = "ElastiCache Redis - pods only"
   vpc_id      = var.vpc_id[0]
 
   ingress {
-    description     = "Backend pods to Redis"
-    from_port       = 6379
-    to_port         = 6379
-    protocol        = "tcp"
-    security_groups = [aws_security_group.eks_nodes.id]
+    description = "Backend pods to Redis"
+    from_port   = 6379
+    to_port     = 6379
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.main.cidr_block]
   }
 
   egress {
